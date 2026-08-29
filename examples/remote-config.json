@@ -1,0 +1,26 @@
+{
+  "mode": "enforce",
+  "startupPosture": "refuse",
+  "enableModify": false,
+  "guardian": {
+    "url": "https://acs-demo.example.invalid/acs",
+    "connectTimeoutMs": 5000,
+    "maxResponseBytes": 1048576,
+    "hmacKeyEnv": "ACS_GUARDIAN_HMAC_KEY",
+    "keyId": "replace-with-client-key-id"
+  },
+  "protectedResource": {
+    "url": "https://acs-demo.example.invalid/protected",
+    "timeoutMs": 5000,
+    "maxResponseBytes": 65536
+  },
+  "audit": {
+    "path": ".opencode/acs-audit.jsonl",
+    "includePayloads": false
+  },
+  "agent": {
+    "id": "opencode-remote-demo",
+    "name": "OpenCode protected-resource demo",
+    "environment": "development"
+  }
+}

@@ -1,0 +1,9 @@
+OpenCode ACS adapter
+Copyright 2026 OpenCode ACS adapter contributors
+
+This product includes Agent Control Standard JSON schemas from the OWASP
+GenAI Security Project, licensed under the Apache License 2.0. The pinned
+upstream revision and original notices are recorded under vendor/acs/.
+
+OpenCode is a separate project. This adapter is not an official OpenCode or
+OWASP integration.

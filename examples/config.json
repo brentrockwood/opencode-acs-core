@@ -1,0 +1,21 @@
+{
+  "mode": "enforce",
+  "startupPosture": "refuse",
+  "enableModify": false,
+  "guardian": {
+    "url": "https://guardian.example/acs",
+    "connectTimeoutMs": 2000,
+    "maxResponseBytes": 1048576,
+    "hmacKeyEnv": "OPENCODE_ACS_HMAC_KEY",
+    "keyId": "replace-with-key-id"
+  },
+  "audit": {
+    "path": ".opencode/acs-audit.jsonl",
+    "includePayloads": false
+  },
+  "agent": {
+    "id": "opencode-workstation",
+    "name": "OpenCode",
+    "environment": "development"
+  }
+}

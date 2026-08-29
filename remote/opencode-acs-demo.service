@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenCode ACS protected-resource demonstration
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode-acs-demo
+Group=opencode-acs-demo
+EnvironmentFile=/etc/opencode-acs-demo.env
+ExecStart=/usr/bin/python3 /opt/opencode-acs-demo/server.py
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/opencode-acs-demo
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

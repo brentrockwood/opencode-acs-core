@@ -1,0 +1,39 @@
+{
+  "name": "opencode-acs-core",
+  "version": "0.1.0-alpha.1",
+  "description": "Experimental Agent Control Standard v0.1 plugin for OpenCode",
+  "type": "module",
+  "license": "Apache-2.0",
+  "files": [
+    "src",
+    "vendor",
+    "docs",
+    "examples",
+    "remote",
+    "README.md",
+    "SECURITY.md",
+    "NOTICE"
+  ],
+  "scripts": {
+    "check": "npm run typecheck && npm test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:e2e": "vitest run test/opencode-runtime.e2e.test.ts",
+    "demo:guardian": "node examples/guardian-demo.mjs",
+    "prepack": "npm run check"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.1.16",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "json-canonicalize": "2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "typescript": "5.9.2",
+    "vitest": "3.2.7"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
