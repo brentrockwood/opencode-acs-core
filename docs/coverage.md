@@ -1,6 +1,6 @@
 # Coverage on OpenCode 1.18.20
 
-This matrix reports what the checked-in runtime suite observed on the installed OpenCode `1.18.20` binary. “Supported” means the fixture reached the hook with the expected data, the decision changed or permitted the real effect, and correlation was observed. It does not mean every invocation shape or future OpenCode release is covered.
+This matrix reports what the checked-in runtime suite observed on the installed OpenCode `1.18.20` binary. “Supported” means the fixture reached the hook with the expected data, the decision changed or permitted the real effect, and correlation was observed. It does not mean every invocation shape or future OpenCode release is covered. The vendored response schema follows open upstream PR #22 at `aae26f823b44a76ec930180aab477da3baa76634`; this remains an implementation-compatibility update, not an ACS-Core claim.
 
 | Boundary | ACS treatment | Status | Evidence and limit |
 |---|---|---|---|
@@ -13,7 +13,7 @@ This matrix reports what the checked-in runtime suite observed on the installed 
 | Built-in `edit` | Request | Supported for deny | Denied fixture leaves original file unchanged. |
 | Built-in `apply_patch` | Request | Supported for deny | Denied fixture does not create its target. |
 | Parallel sibling tool calls | Requests and results | Supported | Two real Bash calls retain distinct ACS request/result references. Guardian requests are serialized per ACS session to preserve chain state. |
-| `task` tool | Request at launch | Supported for launch denial only | Denied task does not launch. No child-action or child-lifecycle coverage is inferred. |
+| `task` tool | Request at launch | Supported for launch denial only | Denied task does not launch. At the tested `tool.execute.before` boundary OpenCode exposes the parent `sessionID` and invocation `callID`, but no child-session identifier or child lifecycle event. The adapter therefore does not fabricate `steps/subagentStart` or infer child coverage. |
 | Plugin-defined custom tool | Request | Supported for tested shape | Fixture receives complete `target` and `content` arguments; denial prevents its file write. Arbitrary third-party behavior is not certified. |
 | Local MCP tool exposed by OpenCode | Request | Supported for tested shape | Inert fixture receives complete arguments; denial prevents its file write. This is tool-call coverage, not raw MCP protocol wrapping. |
 | Tool result | `steps/toolCallResult` | Supported as observation | Correlated after execution. A later deny cannot undo the action. No policy is enforced at this stage. |
@@ -31,9 +31,19 @@ This matrix reports what the checked-in runtime suite observed on the installed 
 | `system/ping` | None | Unsupported | Not advertised because the adapter does not emit it. |
 | First-party `acs_protected_append` | Request, capability receipt, remote execution, result | Supported for deployed demo | A signed `ALLOW` carries a 30-second, single-use capability bound to ACS request, session, action, resource, and value. The capability remains in plugin memory. The remote resource accepts it once; no-capability and replay attempts fail. |
 
-## Failure cases tested
+## Integrity and failure cases tested
 
-Malformed Guardian JSON, unavailable Guardian during startup with refuse posture, unsigned or invalid responses in client tests, response/request correlation errors, unsupported Guardian methods, required provenance, oversized responses, `ASK`, and `DEFER` all follow explicit failure behavior.
+Malformed Guardian JSON, unavailable Guardian during startup with refuse posture, unsigned or invalid decision and JSON-RPC error envelopes in client tests, response/request correlation errors, unsupported Guardian methods, required provenance, oversized responses, `ASK`, and `DEFER` all follow explicit failure behavior. A signed error is authenticated before it is surfaced; a missing or invalid error signature is a signature failure.
+
+## Pending ACS-Core changes in upstream PR #21
+
+PR #21 is open as of this matrix. Nothing here treats its proposed rules as merged or claims ACS-Core conformance.
+
+- The adapter's opt-in Bash-only `MODIFY` remains a narrow extension. If `MODIFY` becomes a SHOULD, it does not make the adapter MODIFY-capable for every tool shape and does not resolve the remaining gaps.
+- `system/ping` remains unimplemented. The PR's proposed SHOULD would remove it only as an unconditional profile blocker; this adapter does not yet document or negotiate a liveness alternative.
+- `wrapped_protocols` remains empty. A deployment that uses MCP still lacks raw `protocols/MCP/*` coverage, including resource reads; normalized MCP-tool invocation is not protocol wrapping. Only a deployment that genuinely does not use MCP could avoid the proposed conditional requirement.
+- OpenCode's `task` launch is gated as a parent tool request, but the tested runtime does not expose an authoritative child session ID at that boundary. The adapter therefore emits no `steps/subagentStart` or `steps/subagentStop` and makes no vacuity claim for a runtime that does expose a task/subagent abstraction.
+- User-message and agent-response coverage, authenticated ASK/DEFER continuations, complete session lifecycle, SessionContext persistence, and profile-level end-to-end evidence are still absent.
 
 ## Revalidation rule
 

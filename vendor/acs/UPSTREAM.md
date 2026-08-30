@@ -1,9 +1,9 @@
 # Vendored Agent Control Standard schemas
 
 - Upstream: <https://github.com/GenAI-Security-Project/agent-control-standard>
-- Revision: `c7ad162f69386daac94b89073e3b751e8cdf28b2`
+- Revision: `aae26f823b44a76ec930180aab477da3baa76634` (upstream PR #22 head; not merged at vendoring time)
 - Schema version: `0.1.0`
-- Retrieved: 2026-08-27
+- Retrieved: 2026-08-30
 - License: Apache License 2.0
 
 The complete `specification/v0.1.0` schema directory is copied without local

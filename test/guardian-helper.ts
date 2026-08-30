@@ -1,5 +1,5 @@
 import { deriveSessionKey, signEnvelope, verifyEnvelope } from "../src/crypto.js";
-import { ACS_VERSION, type AcsRequestEnvelope, type AcsResponseEnvelope, type AcsResult, type JsonObject } from "../src/types.js";
+import { ACS_VERSION, type AcsError, type AcsRequestEnvelope, type AcsResponseEnvelope, type AcsResult, type JsonObject } from "../src/types.js";
 
 export const TEST_KEY = "unit-test-key-material-not-for-production";
 export const TEST_KEY_ID = "test-key";
@@ -9,6 +9,7 @@ export interface GuardianReply {
   raw?: string;
   delayMs?: number;
   result?: Omit<AcsResult, "type" | "acs_version" | "request_id">;
+  error?: Omit<AcsError, "signature">;
 }
 
 export interface TestGuardian {
@@ -58,6 +59,12 @@ export function createGuardian(reply: (request: AcsRequestEnvelope) => GuardianR
         status: selected.status ?? 200,
         headers: { "content-type": "application/json" },
       });
+    }
+    if (selected.error) {
+      const error = { ...selected.error } as AcsError;
+      const response: AcsResponseEnvelope = { jsonrpc: "2.0", id: request.id, error };
+      if (request.method !== "system/ping") error.signature = signEnvelope(response, key, TEST_KEY_ID);
+      return Response.json(response, { status: selected.status ?? 200 });
     }
     const decision = request.method === "handshake/hello"
       ? { decision: "allow" as const, payload: helloPayload(request) }

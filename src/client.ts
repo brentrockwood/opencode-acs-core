@@ -141,7 +141,18 @@ export class AcsClient {
       throw new AcsClientError("invalid_schema", (error as Error).message, error);
     }
     if (response.id !== request.id) throw new AcsClientError("correlation", "JSON-RPC response id does not match request");
-    if (response.error) throw new AcsClientError("guardian_error", response.error.message, response.error);
+    if (response.error) {
+      if (
+        sessionKey && (
+          !response.error.signature
+          || response.error.signature.key_id !== this.config.guardian.keyId
+          || !verifyEnvelope(response, sessionKey, response.error.signature)
+        )
+      ) {
+        throw new AcsClientError("signature", "Guardian error response signature is missing or invalid");
+      }
+      throw new AcsClientError("guardian_error", response.error.message, response.error);
+    }
     if (!response.result) throw new AcsClientError("invalid_schema", "response has neither result nor error");
     if (response.result.request_id !== request.params.request_id) {
       throw new AcsClientError("correlation", "ACS response request_id does not match request");

@@ -106,6 +106,29 @@ describe("Guardian client", () => {
     await expect(client.handshake(newSessionState("ses_local"))).rejects.toMatchObject({ kind: "signature" });
   });
 
+  it("verifies signed JSON-RPC error envelopes before surfacing the error", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest"
+      ? { error: { code: -32001, message: "Guardian rejected the request" } }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const state = newSessionState("ses_host");
+    const acs = new AcsClient(config());
+    state.handshake = await acs.handshake(state);
+    await expect(acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" })))
+      .rejects.toMatchObject({ kind: "guardian_error", message: "Guardian rejected the request" });
+
+    const originalFetch = guardian.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await originalFetch(input, init);
+      const value = await response.json() as { error?: { signature?: unknown } };
+      if (value.error) delete value.error.signature;
+      return Response.json(value);
+    });
+    await expect(acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" })))
+      .rejects.toMatchObject({ kind: "signature" });
+  });
+
   it("serializes same-session requests so the next request carries the prior chain head", async () => {
     process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
     let sequence = 0;
