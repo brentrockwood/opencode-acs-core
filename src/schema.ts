@@ -32,6 +32,8 @@ const serverHelloValidator = schema("https://acs.org/schema/v0.1.0/handshake.jso
 const payloadSchemas: Record<string, string> = {
   "steps/sessionStart": "session-start.json",
   "steps/sessionEnd": "session-end.json",
+  "steps/subagentStart": "subagent-start.json",
+  "steps/subagentStop": "subagent-stop.json",
   "steps/toolCallRequest": "tool-call-request.json",
   "steps/toolCallResult": "tool-call-result.json",
   "system/ping": "system-ping.json",

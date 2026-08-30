@@ -1,9 +1,10 @@
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin/tool";
+import { randomUUID } from "node:crypto";
 import { AcsClient } from "./client.js";
 import { loadConfig } from "./config.js";
 import { applyTopLevelOverrides, resolveDecision, type GateOutcome } from "./enforcer.js";
-import { newSessionState, toolCallPayload, toolResultPayload } from "./mapper.js";
+import { newSessionState, subagentStartPayload, subagentStopPayload, toolCallPayload, toolResultPayload } from "./mapper.js";
 import { appendProtectedValue, PROTECTED_TOOL } from "./protected.js";
 import { AcsClientError, type JsonObject, type SessionState } from "./types.js";
 
@@ -19,6 +20,14 @@ function protectedKey(sessionID: string, value: string): string {
   return `${sessionID}\u0000${value}`;
 }
 
+interface PendingSubagent {
+  callID: string;
+  expectedTitle?: string;
+  state: SessionState;
+  startRequestId: string;
+  boundHostSessionID?: string;
+}
+
 export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) => {
   const loaded = loadConfig(directory);
   if (!loaded) return {};
@@ -27,6 +36,8 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
   const sessions = new Map<string, SessionState>();
   const starts = new Map<string, Promise<SessionState>>();
   const toolRequests = new Map<string, { requestId?: string; tool: string }>();
+  const pendingSubagents = new Map<string, PendingSubagent>();
+  const subagentCalls = new Map<string, PendingSubagent>();
   const protectedCapabilities = new Map<string, string[]>();
 
   async function log(level: "debug" | "info" | "warn" | "error", text: string, extra?: Record<string, unknown>): Promise<void> {
@@ -35,13 +46,14 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
     }).catch(() => undefined);
   }
 
-  async function initialize(sessionID: string): Promise<SessionState> {
-    const existing = sessions.get(sessionID);
-    if (existing) return existing;
+  async function initialize(sessionID: string, preparedState?: SessionState): Promise<SessionState> {
     const pending = starts.get(sessionID);
     if (pending) return pending;
+    const existing = sessions.get(sessionID);
+    if (existing) return existing;
     const start = (async () => {
-      const state = newSessionState(sessionID);
+      const state = preparedState ?? newSessionState(sessionID);
+      state.hostSessionId = sessionID;
       sessions.set(sessionID, state);
       try {
         state.handshake = await client.handshake(state);
@@ -75,6 +87,87 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       return await start;
     } finally {
       starts.delete(sessionID);
+    }
+  }
+
+  async function guardSubagentStart(
+    sessionID: string,
+    callID: string,
+    args: Record<string, unknown>,
+  ): Promise<GateOutcome> {
+    const parent = await initialize(sessionID);
+    if (parent.refuseActions && config.mode === "enforce") {
+      return { action: "deny", reason: "ACS session is not guarded and startup posture is refuse" };
+    }
+    if (pendingSubagents.has(sessionID)) {
+      return {
+        action: "deny",
+        reason: "A concurrent task launch cannot be correlated to a unique OpenCode child session",
+      };
+    }
+
+    const startRequestId = randomUUID();
+    const child = newSessionState(`pending:${callID}`);
+    const pending: PendingSubagent = {
+      callID,
+      ...(typeof args.description === "string" && typeof args.subagent_type === "string"
+        ? { expectedTitle: `${args.description} (@${String(args.subagent_type)} subagent)` }
+        : {}),
+      state: child,
+      startRequestId,
+    };
+    pendingSubagents.set(sessionID, pending);
+    subagentCalls.set(key(sessionID, callID), pending);
+
+    try {
+      const result = await client.request(
+        parent,
+        "steps/subagentStart",
+        subagentStartPayload(parent, child, startRequestId, args),
+        undefined,
+        startRequestId,
+      );
+      if (!client.isEvaluated(parent, "steps/subagentStart") || config.mode === "observe") {
+        await client.record({
+          event: config.mode === "observe" ? "acs_observe_only" : "acs_unevaluated_allow",
+          session_id: parent.sessionId,
+          host_session_id: sessionID,
+          call_id: callID,
+          request_id: result.request_id,
+          method: "steps/subagentStart",
+          decision: result.decision,
+        });
+        return { action: "allow", requestId: result.request_id };
+      }
+      if (result.decision === "allow") return { action: "allow", requestId: result.request_id };
+      pendingSubagents.delete(sessionID);
+      subagentCalls.delete(key(sessionID, callID));
+      return {
+        action: "deny",
+        reason: result.decision === "deny"
+          ? result.reasoning ?? "Denied by ACS Guardian"
+          : `Guardian returned unsupported ${result.decision.toUpperCase()} for subagentStart`,
+        requestId: result.request_id,
+      };
+    } catch (error) {
+      const blocks = config.mode === "enforce"
+        && (parent.handshake ? client.failurePosture(parent) === "deny" : config.startupPosture === "refuse");
+      if (blocks) {
+        pendingSubagents.delete(sessionID);
+        subagentCalls.delete(key(sessionID, callID));
+        return { action: "deny", reason: `ACS decision failure: ${message(error)}`, requestId: startRequestId };
+      }
+      await client.record({
+        event: "acs_fail_open",
+        session_id: parent.sessionId,
+        host_session_id: sessionID,
+        call_id: callID,
+        request_id: startRequestId,
+        method: "steps/subagentStart",
+        failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+        message: message(error),
+      });
+      return { action: "allow", requestId: startRequestId };
     }
   }
 
@@ -151,7 +244,10 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
     } : {}),
     "tool.execute.before": async (input, output) => {
       const args = output.args as Record<string, unknown>;
-      const outcome = await guardTool(input.sessionID, input.callID, input.tool, args);
+      const freshTask = input.tool === "task" && typeof args.task_id !== "string";
+      const outcome = freshTask
+        ? await guardSubagentStart(input.sessionID, input.callID, args)
+        : await guardTool(input.sessionID, input.callID, input.tool, args);
       const canonicalSessionID = sessions.get(input.sessionID)?.sessionId;
       if (outcome.action === "deny") {
         await client.record({
@@ -174,10 +270,12 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         queued.push(outcome.capability);
         protectedCapabilities.set(capabilityKey, queued);
       }
-      toolRequests.set(key(input.sessionID, input.callID), {
-        ...(outcome.requestId ? { requestId: outcome.requestId } : {}),
-        tool: input.tool,
-      });
+      if (!freshTask) {
+        toolRequests.set(key(input.sessionID, input.callID), {
+          ...(outcome.requestId ? { requestId: outcome.requestId } : {}),
+          tool: input.tool,
+        });
+      }
       if (outcome.action === "modify") {
         applyTopLevelOverrides(args, outcome.replacement);
         await client.record({
@@ -191,6 +289,48 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       }
     },
     "tool.execute.after": async (input, output) => {
+      const subagent = subagentCalls.get(key(input.sessionID, input.callID));
+      if (subagent) {
+        subagentCalls.delete(key(input.sessionID, input.callID));
+        const metadata = typeof output.metadata === "object" && output.metadata !== null && !Array.isArray(output.metadata)
+          ? output.metadata as Record<string, unknown>
+          : undefined;
+        const reportedChildID = typeof metadata?.sessionId === "string" ? metadata.sessionId : undefined;
+        const reportedParentID = typeof metadata?.parentSessionId === "string" ? metadata.parentSessionId : undefined;
+        const state = sessions.get(input.sessionID);
+        if (
+          state
+          && metadata?.background !== true
+          && reportedParentID === input.sessionID
+          && reportedChildID === subagent.boundHostSessionID
+        ) {
+          await client.request(state, "steps/subagentStop", subagentStopPayload(subagent.state, "completed"))
+            .catch(async (error) => {
+              await client.record({
+                event: "acs_subagent_stop_observation_failure",
+                session_id: state.sessionId,
+                host_session_id: input.sessionID,
+                call_id: input.callID,
+                subagent_session_id: subagent.state.sessionId,
+                failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+                message: message(error),
+              });
+            });
+        } else {
+          await client.record({
+            event: "acs_subagent_stop_unmapped",
+            ...(state ? { session_id: state.sessionId } : {}),
+            host_session_id: input.sessionID,
+            call_id: input.callID,
+            subagent_session_id: subagent.state.sessionId,
+            ...(reportedChildID ? { reported_child_session_id: reportedChildID } : {}),
+            message: metadata?.background === true
+              ? "background task completion is not observable at tool.execute.after"
+              : "task result did not match the child session bound at session.created",
+          });
+        }
+        return;
+      }
       const tracked = toolRequests.get(key(input.sessionID, input.callID));
       toolRequests.delete(key(input.sessionID, input.callID));
       const state = sessions.get(input.sessionID);
@@ -232,7 +372,26 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       const sessionID = typeof properties.sessionID === "string"
         ? properties.sessionID
         : typeof info?.id === "string" ? info.id : undefined;
-      if (event.type === "session.created" && sessionID) await initialize(sessionID);
+      if (event.type === "session.created" && sessionID) {
+        const parentID = typeof info?.parentID === "string" ? info.parentID : undefined;
+        const title = typeof info?.title === "string" ? info.title : undefined;
+        const pending = parentID ? pendingSubagents.get(parentID) : undefined;
+        if (parentID && pending && (!pending.expectedTitle || pending.expectedTitle === title)) {
+          pendingSubagents.delete(parentID);
+          pending.boundHostSessionID = sessionID;
+          await client.record({
+            event: "acs_subagent_session_bound",
+            session_id: pending.state.sessionId,
+            host_session_id: sessionID,
+            parent_host_session_id: parentID,
+            call_id: pending.callID,
+            request_id: pending.startRequestId,
+          });
+          await initialize(sessionID, pending.state);
+        } else {
+          await initialize(sessionID);
+        }
+      }
       if (event.type === "session.deleted" && sessionID) {
         const state = sessions.get(sessionID);
         sessions.delete(sessionID);
@@ -241,6 +400,11 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         }
         for (const capabilityKey of protectedCapabilities.keys()) {
           if (capabilityKey.startsWith(`${sessionID}\u0000`)) protectedCapabilities.delete(capabilityKey);
+        }
+        const pendingSubagent = pendingSubagents.get(sessionID);
+        if (pendingSubagent) {
+          pendingSubagents.delete(sessionID);
+          subagentCalls.delete(key(sessionID, pendingSubagent.callID));
         }
         if (state?.guarded) {
           await client.request(state, "steps/sessionEnd", {

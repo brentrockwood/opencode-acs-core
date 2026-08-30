@@ -73,6 +73,7 @@ export class AcsClient {
     method: string,
     payload: JsonObject,
     explicitTimeout?: number,
+    explicitRequestId?: string,
   ): Promise<AcsResult> {
     const previous = this.requestQueues.get(state.sessionId) ?? Promise.resolve();
     let release!: () => void;
@@ -80,7 +81,7 @@ export class AcsClient {
     this.requestQueues.set(state.sessionId, current);
     await previous.catch(() => undefined);
     try {
-      return await this.performRequest(state, method, payload, explicitTimeout);
+      return await this.performRequest(state, method, payload, explicitTimeout, explicitRequestId);
     } finally {
       release();
       if (this.requestQueues.get(state.sessionId) === current) this.requestQueues.delete(state.sessionId);
@@ -92,8 +93,9 @@ export class AcsClient {
     method: string,
     payload: JsonObject,
     explicitTimeout?: number,
+    explicitRequestId?: string,
   ): Promise<AcsResult> {
-    const request = buildRequest(this.config, state, method, payload);
+    const request = buildRequest(this.config, state, method, payload, explicitRequestId);
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 1_048_576) {
       throw new AcsClientError("request_too_large", "ACS payload exceeds the advertised 1048576-byte limit");
     }
