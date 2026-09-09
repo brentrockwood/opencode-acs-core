@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+
+# Check source quality and scan the exact staged content before each commit.
+set -euo pipefail
+
+npm run lint
+
+if ! command -v trufflehog >/dev/null 2>&1; then
+  echo "pre-commit: trufflehog is required but was not found on PATH." >&2
+  exit 1
+fi
+
+if ! {
+  while IFS= read -r -d '' path; do
+    printf '\n--- staged file: %s ---\n' "$path"
+    git show ":${path}"
+  done < <(git diff --cached --name-only --diff-filter=ACMR -z)
+} | trufflehog stdin --fail --no-update --no-verification --no-color; then
+  echo "pre-commit: TruffleHog found a possible secret in staged content." >&2
+  exit 1
+fi
