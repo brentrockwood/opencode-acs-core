@@ -1,6 +1,6 @@
 # Coverage on OpenCode 1.18.20
 
-This matrix reports what the checked-in runtime suite observed on the installed OpenCode `1.18.20` binary. “Supported” means the fixture reached the hook with the expected data, the decision changed or permitted the real effect, and correlation was observed. It does not mean every invocation shape or future OpenCode release is covered. The vendored response schema follows open upstream PR #22 at `aae26f823b44a76ec930180aab477da3baa76634`; this remains an implementation-compatibility update, not an ACS-Core claim.
+This matrix reports what the checked-in runtime suite observed on the installed OpenCode `1.18.20` binary. “Supported” means the fixture reached the hook with the expected data, the decision changed or permitted the real effect, and correlation was observed. It does not mean every invocation shape or future OpenCode release is covered. The vendored schema follows open upstream PR #21 at `b865e510e17165258fb65810938086217b28c7ae`, which proposes repository release `0.1.3`. Reference-adapter behavior is tracked at open PR #22 head `7174a033c15f69ee58caaa5eb0a19279592171c7`. Neither pin is an ACS-Core claim.
 
 | Boundary | ACS treatment | Status | Evidence and limit |
 |---|---|---|---|
@@ -19,6 +19,7 @@ This matrix reports what the checked-in runtime suite observed on the installed 
 | Fresh background or failed/cancelled `task` | Partial subagent lifecycle | Unsupported terminal-lifecycle claim | A fresh background task can pass the start gate and bind its child, but completion is not exposed through the tested successful foreground `tool.execute.after` path. Failed and cancelled termination are likewise not mapped, so complete `subagentStop` coverage is not claimed. |
 | Plugin-defined custom tool | Request | Supported for tested shape | Fixture receives complete `target` and `content` arguments; denial prevents its file write. Arbitrary third-party behavior is not certified. |
 | Local MCP tool exposed by OpenCode | Request | Supported for tested shape | Inert fixture receives complete arguments; denial prevents its file write. This is tool-call coverage, not raw MCP protocol wrapping. |
+| Built-in `skill` tool | Generic `steps/toolCallRequest` / `steps/toolCallResult` | Supported as a tool gate; no skill-lifecycle claim | The pre-execution hook exposes the requested skill name, and the successful result exposes rendered content plus `name` and `dir` metadata. It does not provide a prior approved registration, a stable id plus digest over the complete loadable artifact, or an unload boundary. The adapter therefore does not fabricate `skillRegister`, `skillLoad`, or `skillUnload`. |
 | Tool result | `steps/toolCallResult` | Supported as observation | Correlated after execution. A later deny cannot undo the action. No policy is enforced at this stage. |
 | Bash `MODIFY` | Argument replacement before execution | Supported, opt-in | On `1.18.20`, the replacement command—not the original marker-bearing command—produces the observed content. Only a nonempty replacement for `bash.command` is accepted. |
 | File/path/structured `MODIFY` | None | Unsupported | No claim for `read`, `write`, `edit`, `apply_patch`, MCP, custom tools, redactions, or `modified_content`. |
@@ -38,16 +39,17 @@ OpenCode's SDK also exposes `Session.parentID` and `session.children({ path: { i
 
 ## Integrity and failure cases tested
 
-Malformed Guardian JSON, unavailable Guardian during startup with refuse posture, unsigned or invalid decision and JSON-RPC error envelopes in client tests, response/request correlation errors, unsupported Guardian methods, required provenance, oversized responses, `ASK`, and `DEFER` all follow explicit failure behavior. A signed error is authenticated before it is surfaced; a missing or invalid error signature is a signature failure.
+Malformed Guardian JSON, unavailable Guardian during startup with refuse posture, unsigned or invalid decision and JSON-RPC error envelopes in client tests, response/request correlation errors, unsupported Guardian methods, required provenance, oversized responses, `ASK`, and `DEFER` all follow explicit failure behavior. A signed error is authenticated before it is surfaced; a missing or invalid error signature is a signature failure. Current PR #22 reference adapters also sign errors, although the current schema does not define an explicit `error.signature` property. Requiring it when the session key is available is deliberate conservative interoperability behavior, not a conformance claim.
 
-## Pending ACS-Core changes in upstream PR #21
+## Proposed ACS-Core 0.1.3 changes in upstream PR #21
 
-PR #21 is open as of this matrix. Nothing here treats its proposed rules as merged or claims ACS-Core conformance.
+PR #21 is open and awaiting re-review as of 2026-09-15. Nothing here treats its proposed rules as merged or claims ACS-Core conformance.
 
-- The adapter's opt-in Bash-only `MODIFY` remains a narrow extension. If `MODIFY` becomes a SHOULD, it does not make the adapter MODIFY-capable for every tool shape and does not resolve the remaining gaps.
-- `system/ping` remains unimplemented. The PR's proposed SHOULD would remove it only as an unconditional profile blocker; this adapter does not yet document or negotiate a liveness alternative.
-- `wrapped_protocols` remains empty. A deployment that uses MCP still lacks raw `protocols/MCP/*` coverage, including resource reads; normalized MCP-tool invocation is not protocol wrapping. Only a deployment that genuinely does not use MCP could avoid the proposed conditional requirement.
-- Fresh foreground `task` launches now use `steps/subagentStart`, and the tested runtime binds the resulting `parentID` child session before its first tool call. Successful foreground completion emits `steps/subagentStop`. Resume, background completion, and failure/cancellation termination remain incomplete, so the proposed mandatory subagent pair is not yet a basis for an ACS-Core claim.
+- The adapter's opt-in Bash-only `MODIFY` remains a narrow extension. Under the proposal, `MODIFY` is SHOULD-support; unsupported shapes must normally become `DENY` with audit, with a special `postCompact` exception. The adapter fails closed on unsupported tool modifications but does not implement the whole proposed contract.
+- `system/ping` remains unimplemented. The proposal makes it SHOULD-support but requires a deployment-named alternative when omitted. This adapter does not configure or assert such an alternative, so this remains a proposed Core gap.
+- `wrapped_protocols` remains empty. The proposal requires wrapped coverage whenever a session involves MCP, except that MCP `tools/call` may use generic tool hooks. OpenCode's normalized tool hook does not expose resource reads, prompts, notifications, or negotiation, so only a deployment that genuinely never uses MCP could omit the namespace.
+- Fresh `task` launches use decision-eligible `steps/subagentStart`, and the tested runtime binds the resulting `parentID` child session before its first tool call. This addresses the proposal's MUST-emit spawn gate for the tested shape. Successful foreground completion emits the proposed SHOULD-level `steps/subagentStop`; resume, background completion, and failure/cancellation termination remain incomplete and are not claimed.
+- Skill lifecycle hooks are SHOULD-emit when observable. The built-in `skill` tool remains governed as a generic tool call because its plugin hooks do not supply the prior registration and complete-artifact digest needed to bind an honest `skillLoad`, or any unload boundary.
 - User-message and agent-response coverage, authenticated ASK/DEFER continuations, complete session lifecycle, SessionContext persistence, and profile-level end-to-end evidence are still absent.
 
 ## Revalidation rule

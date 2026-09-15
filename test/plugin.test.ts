@@ -134,4 +134,59 @@ describe("OpenCode plugin lifecycle", () => {
       request.method === "steps/toolCallRequest"
       && (request.params.payload.tool as Record<string, unknown> | undefined)?.name === "task")).toBe(false);
   });
+
+  it("governs skill loading as a generic tool call without fabricating skill lifecycle evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-skill-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    await writeFile(configPath, JSON.stringify({
+      mode: "enforce",
+      startupPosture: "refuse",
+      guardian: {
+        url: "http://127.0.0.1:8787/",
+        hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY",
+        keyId: "test-key",
+      },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian();
+    vi.stubGlobal("fetch", guardian.fetch);
+
+    const hooks = await AcsPlugin({
+      directory,
+      client: { app: { log: vi.fn(async () => undefined) } },
+    } as never);
+    if (!hooks.event || !hooks["tool.execute.before"] || !hooks["tool.execute.after"]) {
+      throw new Error("plugin did not register the required lifecycle hooks");
+    }
+
+    await hooks.event({
+      event: { type: "session.created", properties: { info: { id: "ses_skill" } } },
+    } as never);
+    await hooks["tool.execute.before"](
+      { tool: "skill", sessionID: "ses_skill", callID: "call_skill" },
+      { args: { name: "release-notes" } },
+    );
+    await hooks["tool.execute.after"](
+      { tool: "skill", sessionID: "ses_skill", callID: "call_skill" },
+      {
+        title: "Loaded skill: release-notes",
+        output: "<skill_content name=\"release-notes\">instructions</skill_content>",
+        metadata: { name: "release-notes", dir: "/example/skills/release-notes" },
+      },
+    );
+
+    const request = guardian.requests.find((candidate) =>
+      candidate.method === "steps/toolCallRequest"
+      && (candidate.params.payload.tool as Record<string, unknown> | undefined)?.name === "skill");
+    expect(request?.params.payload.arguments).toEqual({ name: { value: "release-notes" } });
+    expect(guardian.requests.some((candidate) => candidate.method === "steps/toolCallResult"
+      && candidate.params.payload.request_id_ref === request?.params.request_id)).toBe(true);
+    expect(guardian.requests.some((candidate) => [
+      "steps/skillRegister",
+      "steps/skillLoad",
+      "steps/skillUnload",
+    ].includes(candidate.method))).toBe(false);
+  });
 });

@@ -6,6 +6,7 @@ import addFormatsImport from "ajv-formats";
 import type { AcsRequestEnvelope, AcsResponseEnvelope, JsonObject } from "./types.js";
 
 const schemaRoot = fileURLToPath(new URL("../vendor/acs/v0.1.0/", import.meta.url));
+const schemaIdRoot = "https://genai-security-project.github.io/agent-control-standard/schema/v0.1.0";
 
 function jsonFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
@@ -25,10 +26,10 @@ function schema(id: string): ValidateFunction {
   return found;
 }
 
-const requestValidator = schema("https://acs.org/schema/v0.1.0/request-envelope.json");
-const responseValidator = schema("https://acs.org/schema/v0.1.0/response-envelope.json");
-const clientHelloValidator = schema("https://acs.org/schema/v0.1.0/handshake.json#/$defs/ClientHello");
-const serverHelloValidator = schema("https://acs.org/schema/v0.1.0/handshake.json#/$defs/ServerHello");
+const requestValidator = schema(`${schemaIdRoot}/request-envelope.json`);
+const responseValidator = schema(`${schemaIdRoot}/response-envelope.json`);
+const clientHelloValidator = schema(`${schemaIdRoot}/handshake.json#/$defs/ClientHello`);
+const serverHelloValidator = schema(`${schemaIdRoot}/handshake.json#/$defs/ServerHello`);
 const payloadSchemas: Record<string, string> = {
   "steps/sessionStart": "session-start.json",
   "steps/sessionEnd": "session-end.json",
@@ -55,7 +56,7 @@ export function validateRequest(envelope: AcsRequestEnvelope): void {
   }
   const filename = payloadSchemas[envelope.method];
   if (!filename) throw new Error(`unsupported ACS method: ${envelope.method}`);
-  assertValid(schema(`https://acs.org/schema/v0.1.0/hooks/${filename}`), envelope.params.payload, `invalid ${envelope.method} payload`);
+  assertValid(schema(`${schemaIdRoot}/hooks/${filename}`), envelope.params.payload, `invalid ${envelope.method} payload`);
 }
 
 export function validateResponse(envelope: AcsResponseEnvelope): void {
