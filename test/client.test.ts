@@ -5,13 +5,13 @@ import { newSessionState, toolCallPayload } from "../src/mapper.js";
 import { AcsClientError } from "../src/types.js";
 import { createGuardian, TEST_KEY, TEST_KEY_ID } from "./guardian-helper.js";
 
-function config(timeout = 100): AcsConfig {
+function config(timeout = 100, url = "http://127.0.0.1:8787/"): AcsConfig {
   return {
     mode: "enforce",
     startupPosture: "refuse",
     enableModify: false,
     guardian: {
-      url: "http://127.0.0.1:8787/",
+      url,
       connectTimeoutMs: timeout,
       maxResponseBytes: 1024 * 1024,
       hmacKeyEnv: "OPENCODE_ACS_CLIENT_TEST_KEY",
@@ -30,16 +30,28 @@ describe("Guardian client", () => {
 
   it("accepts a direct ServerHello and verifies a signed tool decision", async () => {
     process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
-    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest"
-      ? { result: { decision: "deny", reasoning: "policy" } }
-      : {});
+    const guardian = createGuardian((request) => {
+      if (request.method === "handshake/hello") return { directHello: true };
+      return request.method === "steps/toolCallRequest"
+        ? { result: { decision: "deny", reasoning: "policy" } }
+        : {};
+    });
     vi.stubGlobal("fetch", guardian.fetch);
-    const client = new AcsClient(config());
+    const client = new AcsClient(config(100, "https://guardian.example/"));
     const state = newSessionState("ses_local");
     state.handshake = await client.handshake(state);
     const result = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "false" }));
     expect(result).toMatchObject({ decision: "deny", reasoning: "policy" });
     expect(guardian.requests.every((request) => request.method === "system/ping" || request.params.signature?.key_id === TEST_KEY_ID)).toBe(true);
+  });
+
+  it("rejects an unsigned direct ServerHello over HTTP", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "handshake/hello" ? { directHello: true } : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const client = new AcsClient(config());
+    await expect(client.handshake(newSessionState("ses_local")))
+      .rejects.toMatchObject({ kind: "signature" });
   });
 
   it("categorizes malformed JSON", async () => {
@@ -108,8 +120,11 @@ describe("Guardian client", () => {
     const originalFetch = guardian.fetch;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const response = await originalFetch(input, init);
+      const request = JSON.parse(String(init?.body)) as { method?: string };
       const value = await response.json() as { result?: { signature?: { key_id: string } } };
-      if (value.result?.signature) value.result.signature.key_id = "different-key";
+      if (request.method === "steps/toolCallRequest" && value.result?.signature) {
+        value.result.signature.key_id = "different-key";
+      }
       return Response.json(value);
     });
     const client = new AcsClient(config());

@@ -4,7 +4,7 @@ This matrix reports what the checked-in runtime suite observed on the installed 
 
 | Boundary | ACS treatment | Status | Evidence and limit |
 |---|---|---|---|
-| Handshake | `handshake/hello` | Supported | Lazy initialization accepts the schema's direct `ServerHello` response and negotiates ACS `0.1.0`, evaluated methods, timeouts, failure posture, transport, and HMAC support. |
+| Handshake | `handshake/hello` | Supported | Lazy initialization accepts the schema's unsigned direct `ServerHello` only over authenticated HTTPS; loopback HTTP uses the signed legacy `AcsResult.payload` shape so negotiation remains authenticated. It negotiates ACS `0.1.0`, evaluated methods, timeouts, failure posture, transport, and HMAC support. |
 | First governed tool in a session | `steps/sessionStart`, then `steps/toolCallRequest` | Supported | Initialization completes before the first tool decision. OpenCode host IDs are mapped to canonical ACS UUIDs. |
 | Session deletion | `steps/sessionEnd` | Partial | A unit test verifies a schema-valid `reason: abandoned` request when `session.deleted` is observed and verifies that recreating the host ID starts a new ACS session. Process exit is not claimed as a reliable end event. |
 | Built-in `bash` | Pre-execution `steps/toolCallRequest`; post-execution result | Supported | Real allow and deny side effects verified. Nonzero OpenCode exit metadata maps to ACS `failure`. |

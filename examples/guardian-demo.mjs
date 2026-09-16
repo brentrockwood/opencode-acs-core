@@ -62,11 +62,10 @@ const server = createServer(async (incoming, outgoing) => {
       outgoing.writeHead(401).end();
       return;
     }
-    const response = request.method === "handshake/hello"
+    const decision = request.method === "handshake/hello"
       ? {
-          jsonrpc: "2.0",
-          id: request.id,
-          result: {
+          decision: "allow",
+          payload: {
             negotiated_version: "0.1.0",
             methods_evaluated: request.params.payload.methods_implemented,
             selected_transport: "http",
@@ -77,17 +76,18 @@ const server = createServer(async (incoming, outgoing) => {
             profiles_accepted: [],
           },
         }
-      : {
-          jsonrpc: "2.0",
-          id: request.id,
-          result: {
-            type: "final",
-            acs_version: "0.1.0",
-            request_id: request.params.request_id,
-            ...resultFor(request),
-          },
-        };
-    if (request.method !== "handshake/hello" && request.method !== "system/ping") {
+      : resultFor(request);
+    const response = {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        type: "final",
+        acs_version: "0.1.0",
+        request_id: request.params.request_id,
+        ...decision,
+      },
+    };
+    if (request.method !== "system/ping") {
       response.result.signature = {
         algorithm: "HMAC-SHA256",
         value: signature(response, key).toString("base64"),

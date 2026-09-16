@@ -181,6 +181,9 @@ export class AcsClient {
       if (method !== "handshake/hello") {
         throw new AcsClientError("invalid_schema", "Guardian returned ServerHello outside handshake/hello");
       }
+      if (new URL(this.config.guardian.url).protocol !== "https:") {
+        throw new AcsClientError("signature", "Direct ServerHello requires an authenticated HTTPS Guardian transport");
+      }
       return response.result;
     }
     const result = response.result;
