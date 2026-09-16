@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { AcsConfig } from "../src/config.js";
-import { buildRequest, clientHello, newSessionState, toolCallPayload, toolResultPayload } from "../src/mapper.js";
+import {
+  buildRequest,
+  clientHello,
+  newSessionState,
+  subagentStartPayload,
+  subagentStopPayload,
+  toolCallPayload,
+  toolResultPayload,
+} from "../src/mapper.js";
 import { validateRequest } from "../src/schema.js";
 
 const config = {
@@ -42,5 +50,24 @@ describe("ACS mapping", () => {
     }));
     expect(() => validateRequest(failure)).not.toThrow();
     expect(failure.params.payload.exit_status).toBe("failure");
+  });
+
+  it("validates a task launch as a correlated subagent lifecycle", () => {
+    const parent = newSessionState("ses_parent");
+    const child = newSessionState("pending:call_task");
+    const requestId = "00000000-0000-4000-8000-000000000001";
+    const start = buildRequest(config, parent, "steps/subagentStart", subagentStartPayload(
+      parent,
+      child,
+      requestId,
+      { prompt: "inspect the repository", subagent_type: "general" },
+    ), requestId);
+    expect(() => validateRequest(start)).not.toThrow();
+    expect(start.params.request_id).toBe(requestId);
+    expect(start.params.payload.parent_step_id).toBe(requestId);
+    expect(start.params.payload.subagent_session_id).toBe(child.sessionId);
+
+    const stop = buildRequest(config, parent, "steps/subagentStop", subagentStopPayload(child, "completed"));
+    expect(() => validateRequest(stop)).not.toThrow();
   });
 });

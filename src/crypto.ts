@@ -23,6 +23,7 @@ export function canonicalEnvelope(envelope: SignableEnvelope): string {
   const value = structuredClone(envelope) as SignableEnvelope;
   if ("params" in value) delete value.params.signature;
   if ("result" in value && value.result) delete value.result.signature;
+  if ("error" in value && value.error) delete value.error.signature;
   return canonicalize(value);
 }
 

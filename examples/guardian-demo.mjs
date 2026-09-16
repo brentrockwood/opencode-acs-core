@@ -39,21 +39,6 @@ function validRequest(request, key) {
 }
 
 function resultFor(request) {
-  if (request.method === "handshake/hello") {
-    return {
-      decision: "allow",
-      payload: {
-        negotiated_version: "0.1.0",
-        methods_evaluated: request.params.payload.methods_implemented,
-        selected_transport: "http",
-        signature_algorithms_supported: ["HMAC-SHA256"],
-        timeout_config: { default_ms: 2000 },
-        on_decision_failure: "deny",
-        policy_requires_provenance: false,
-        profiles_accepted: [],
-      },
-    };
-  }
   if (request.method === "steps/toolCallRequest" && String(request.params.payload.raw_command ?? "").includes("ACS_DEMO_DENY")) {
     return { decision: "deny", reasoning: "blocked by the demo Guardian marker" };
   }
@@ -73,10 +58,25 @@ const server = createServer(async (incoming, outgoing) => {
     const id = request?.params?.metadata?.session_id;
     if (typeof id !== "string") throw new Error("request has no session id");
     const key = sessionKey(id);
-    if (!validRequest(request, key)) {
+    if (request.method !== "system/ping" && !validRequest(request, key)) {
       outgoing.writeHead(401).end();
       return;
     }
+    const decision = request.method === "handshake/hello"
+      ? {
+          decision: "allow",
+          payload: {
+            negotiated_version: "0.1.0",
+            methods_evaluated: request.params.payload.methods_implemented,
+            selected_transport: "http",
+            signature_algorithms_supported: ["HMAC-SHA256"],
+            timeout_config: { default_ms: 2000 },
+            on_decision_failure: "deny",
+            policy_requires_provenance: false,
+            profiles_accepted: [],
+          },
+        }
+      : resultFor(request);
     const response = {
       jsonrpc: "2.0",
       id: request.id,
@@ -84,14 +84,16 @@ const server = createServer(async (incoming, outgoing) => {
         type: "final",
         acs_version: "0.1.0",
         request_id: request.params.request_id,
-        ...resultFor(request),
+        ...decision,
       },
     };
-    response.result.signature = {
-      algorithm: "HMAC-SHA256",
-      value: signature(response, key).toString("base64"),
-      key_id: keyId,
-    };
+    if (request.method !== "system/ping") {
+      response.result.signature = {
+        algorithm: "HMAC-SHA256",
+        value: signature(response, key).toString("base64"),
+        key_id: keyId,
+      };
+    }
     outgoing.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(response));
   } catch (error) {
     outgoing.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: String(error) }));
