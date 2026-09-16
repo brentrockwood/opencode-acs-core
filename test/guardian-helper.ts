@@ -1,5 +1,5 @@
 import { deriveSessionKey, signEnvelope, verifyEnvelope } from "../src/crypto.js";
-import { ACS_VERSION, type AcsError, type AcsRequestEnvelope, type AcsResponseEnvelope, type AcsResult, type JsonObject } from "../src/types.js";
+import { ACS_VERSION, type AcsError, type AcsRequestEnvelope, type AcsResponseEnvelope, type AcsResult, type ServerHello } from "../src/types.js";
 
 export const TEST_KEY = "unit-test-key-material-not-for-production";
 export const TEST_KEY_ID = "test-key";
@@ -17,10 +17,13 @@ export interface TestGuardian {
   fetch: typeof globalThis.fetch;
 }
 
-function helloPayload(request: AcsRequestEnvelope): JsonObject {
+function helloPayload(request: AcsRequestEnvelope): ServerHello {
+  const offered = request.params.payload.methods_implemented;
   return {
     negotiated_version: ACS_VERSION,
-    methods_evaluated: request.params.payload.methods_implemented ?? [],
+    methods_evaluated: Array.isArray(offered)
+      ? offered.filter((method): method is string => typeof method === "string")
+      : [],
     selected_transport: "http",
     signature_algorithms_supported: ["HMAC-SHA256"],
     timeout_config: { default_ms: 1_000 },
@@ -66,9 +69,11 @@ export function createGuardian(reply: (request: AcsRequestEnvelope) => GuardianR
       if (request.method !== "system/ping") error.signature = signEnvelope(response, key, TEST_KEY_ID);
       return Response.json(response, { status: selected.status ?? 200 });
     }
-    const decision = request.method === "handshake/hello"
-      ? { decision: "allow" as const, payload: helloPayload(request) }
-      : selected.result ?? { decision: "allow" as const };
+    if (request.method === "handshake/hello") {
+      const response: AcsResponseEnvelope = { jsonrpc: "2.0", id: request.id, result: helloPayload(request) };
+      return Response.json(response, { status: selected.status ?? 200 });
+    }
+    const decision = selected.result ?? { decision: "allow" as const };
     const result = {
       type: "final",
       acs_version: ACS_VERSION,

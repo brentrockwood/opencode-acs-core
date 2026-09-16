@@ -14,6 +14,12 @@ import {
   type SessionState,
 } from "./types.js";
 
+function isServerHello(result: AcsResult | ServerHello): result is ServerHello {
+  return !("decision" in result)
+    && typeof result.negotiated_version === "string"
+    && Array.isArray(result.methods_evaluated);
+}
+
 export class AcsClient {
   private readonly audit: AuditSink;
   private readonly inputKeyMaterial: string | undefined;
@@ -33,17 +39,18 @@ export class AcsClient {
   }
 
   async handshake(state: SessionState): Promise<ServerHello> {
-    const result = await this.request(state, "handshake/hello", clientHello(), this.config.guardian.connectTimeoutMs);
-    if (!result.payload) throw new AcsClientError("invalid_schema", "handshake response has no ServerHello payload");
+    const result = await this.exchange(state, "handshake/hello", clientHello(), this.config.guardian.connectTimeoutMs);
+    const payload = isServerHello(result) ? result : result.payload;
+    if (!payload) throw new AcsClientError("invalid_schema", "handshake response has no ServerHello payload");
     try {
-      validateServerHello(result.payload);
+      validateServerHello(payload);
     } catch (error) {
       throw new AcsClientError("invalid_schema", (error as Error).message, error);
     }
-    if (result.payload.negotiated_version !== ACS_VERSION) {
-      throw new AcsClientError("correlation", `Guardian negotiated unsupported ACS version ${result.payload.negotiated_version}`);
+    if (payload.negotiated_version !== ACS_VERSION) {
+      throw new AcsClientError("correlation", `Guardian negotiated unsupported ACS version ${payload.negotiated_version}`);
     }
-    const hello = result.payload as unknown as ServerHello;
+    const hello = payload as unknown as ServerHello;
     const advertised = new Set<string>(METHODS_IMPLEMENTED);
     const unexpected = hello.methods_evaluated.filter((method) => !advertised.has(method));
     if (unexpected.length > 0) {
@@ -75,6 +82,20 @@ export class AcsClient {
     explicitTimeout?: number,
     explicitRequestId?: string,
   ): Promise<AcsResult> {
+    const result = await this.exchange(state, method, payload, explicitTimeout, explicitRequestId);
+    if (isServerHello(result)) {
+      throw new AcsClientError("invalid_schema", "Guardian returned ServerHello outside handshake/hello");
+    }
+    return result;
+  }
+
+  private async exchange(
+    state: SessionState,
+    method: string,
+    payload: JsonObject,
+    explicitTimeout?: number,
+    explicitRequestId?: string,
+  ): Promise<AcsResult | ServerHello> {
     const previous = this.requestQueues.get(state.sessionId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
@@ -94,7 +115,7 @@ export class AcsClient {
     payload: JsonObject,
     explicitTimeout?: number,
     explicitRequestId?: string,
-  ): Promise<AcsResult> {
+  ): Promise<AcsResult | ServerHello> {
     const request = buildRequest(this.config, state, method, payload, explicitRequestId);
     if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 1_048_576) {
       throw new AcsClientError("request_too_large", "ACS payload exceeds the advertised 1048576-byte limit");
@@ -145,7 +166,7 @@ export class AcsClient {
     if (response.id !== request.id) throw new AcsClientError("correlation", "JSON-RPC response id does not match request");
     if (response.error) {
       if (
-        sessionKey && (
+        sessionKey && method !== "system/ping" && (
           !response.error.signature
           || response.error.signature.key_id !== this.config.guardian.keyId
           || !verifyEnvelope(response, sessionKey, response.error.signature)
@@ -156,35 +177,42 @@ export class AcsClient {
       throw new AcsClientError("guardian_error", response.error.message, response.error);
     }
     if (!response.result) throw new AcsClientError("invalid_schema", "response has neither result nor error");
-    if (response.result.request_id !== request.params.request_id) {
+    if (isServerHello(response.result)) {
+      if (method !== "handshake/hello") {
+        throw new AcsClientError("invalid_schema", "Guardian returned ServerHello outside handshake/hello");
+      }
+      return response.result;
+    }
+    const result = response.result;
+    if (result.request_id !== request.params.request_id) {
       throw new AcsClientError("correlation", "ACS response request_id does not match request");
     }
-    if (response.result.acs_version !== ACS_VERSION) {
-      throw new AcsClientError("correlation", `ACS response uses unexpected version ${response.result.acs_version}`);
+    if (result.acs_version !== ACS_VERSION) {
+      throw new AcsClientError("correlation", `ACS response uses unexpected version ${result.acs_version}`);
     }
     if (sessionKey && method !== "system/ping") {
       if (
-        !response.result.signature
-        || response.result.signature.key_id !== this.config.guardian.keyId
-        || !verifyEnvelope(response, sessionKey, response.result.signature)
+        !result.signature
+        || result.signature.key_id !== this.config.guardian.keyId
+        || !verifyEnvelope(response, sessionKey, result.signature)
       ) {
         throw new AcsClientError("signature", "Guardian response signature is missing or invalid");
       }
     }
 
-    if (method === "system/ping" && (response.result.decision !== "allow" || response.result.chain_hash)) {
+    if (method === "system/ping" && (result.decision !== "allow" || result.chain_hash)) {
       throw new AcsClientError("guardian_error", "system/ping must return ALLOW without a chain hash");
     }
-    if (response.result.chain_hash) state.chainHash = response.result.chain_hash;
+    if (result.chain_hash) state.chainHash = result.chain_hash;
     await this.audit.write({
       event: "acs_decision",
       session_id: state.sessionId,
       request_id: request.params.request_id,
       method,
-      decision: response.result.decision,
-      payload: response.result,
+      decision: result.decision,
+      payload: result,
     });
-    return response.result;
+    return result;
   }
 
   failurePosture(state: SessionState): "proceed" | "deny" {

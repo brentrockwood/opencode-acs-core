@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -133,6 +133,64 @@ describe("OpenCode plugin lifecycle", () => {
     expect(guardian.requests.some((request) =>
       request.method === "steps/toolCallRequest"
       && (request.params.payload.tool as Record<string, unknown> | undefined)?.name === "task")).toBe(false);
+  });
+
+  it("allows an ambiguous concurrent task in observe mode without fabricating lifecycle evidence", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-observe-subagent-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    const auditPath = join(directory, "audit.jsonl");
+    await writeFile(configPath, JSON.stringify({
+      mode: "observe",
+      startupPosture: "proceed",
+      guardian: {
+        url: "http://127.0.0.1:8787/",
+        hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY",
+        keyId: "test-key",
+      },
+      audit: { path: auditPath },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian();
+    vi.stubGlobal("fetch", guardian.fetch);
+
+    const hooks = await AcsPlugin({
+      directory,
+      client: { app: { log: vi.fn(async () => undefined) } },
+    } as never);
+    if (!hooks.event || !hooks["tool.execute.before"] || !hooks["tool.execute.after"]) {
+      throw new Error("plugin did not register the required lifecycle hooks");
+    }
+
+    await hooks.event({
+      event: { type: "session.created", properties: { info: { id: "ses_observe_parent" } } },
+    } as never);
+    await hooks["tool.execute.before"](
+      { tool: "task", sessionID: "ses_observe_parent", callID: "call_first" },
+      { args: { description: "first child", prompt: "first", subagent_type: "general" } },
+    );
+    await expect(hooks["tool.execute.before"](
+      { tool: "task", sessionID: "ses_observe_parent", callID: "call_ambiguous" },
+      { args: { description: "second child", prompt: "second", subagent_type: "general" } },
+    )).resolves.toBeUndefined();
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "ses_observe_parent", callID: "call_ambiguous" },
+      {
+        title: "second child",
+        output: "done",
+        metadata: { parentSessionId: "ses_observe_parent", sessionId: "ses_second_child" },
+      },
+    );
+
+    expect(guardian.requests.filter((request) => request.method === "steps/subagentStart")).toHaveLength(1);
+    expect(guardian.requests.some((request) => request.method === "steps/toolCallResult"
+      && (request.params.payload.tool as Record<string, unknown> | undefined)?.name === "task")).toBe(false);
+    const audit = (await readFile(auditPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(audit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "acs_subagent_start_unmapped", call_id: "call_ambiguous" }),
+      expect.objectContaining({ event: "acs_subagent_stop_unmapped", call_id: "call_ambiguous" }),
+    ]));
   });
 
   it("governs skill loading as a generic tool call without fabricating skill lifecycle evidence", async () => {

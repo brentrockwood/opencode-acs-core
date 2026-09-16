@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv2020, type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
 import addFormatsImport from "ajv-formats";
-import type { AcsRequestEnvelope, AcsResponseEnvelope, JsonObject } from "./types.js";
+import type { AcsRequestEnvelope, AcsResponseEnvelope } from "./types.js";
 
 const schemaRoot = fileURLToPath(new URL("../vendor/acs/v0.1.0/", import.meta.url));
 const schemaIdRoot = "https://genai-security-project.github.io/agent-control-standard/schema/v0.1.0";
@@ -63,6 +63,6 @@ export function validateResponse(envelope: AcsResponseEnvelope): void {
   assertValid(responseValidator, envelope, "invalid ACS response envelope");
 }
 
-export function validateServerHello(payload: JsonObject): void {
+export function validateServerHello(payload: unknown): void {
   assertValid(serverHelloValidator, payload, "invalid ACS ServerHello");
 }

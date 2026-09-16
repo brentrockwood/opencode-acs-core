@@ -38,6 +38,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
   const toolRequests = new Map<string, { requestId?: string; tool: string }>();
   const pendingSubagents = new Map<string, PendingSubagent>();
   const subagentCalls = new Map<string, PendingSubagent>();
+  const uncorrelatedSubagentCalls = new Set<string>();
   const protectedCapabilities = new Map<string, string[]>();
 
   async function log(level: "debug" | "info" | "warn" | "error", text: string, extra?: Record<string, unknown>): Promise<void> {
@@ -100,6 +101,18 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       return { action: "deny", reason: "ACS session is not guarded and startup posture is refuse" };
     }
     if (pendingSubagents.has(sessionID)) {
+      if (config.mode === "observe") {
+        uncorrelatedSubagentCalls.add(key(sessionID, callID));
+        await client.record({
+          event: "acs_subagent_start_unmapped",
+          session_id: parent.sessionId,
+          host_session_id: sessionID,
+          call_id: callID,
+          method: "steps/subagentStart",
+          message: "concurrent task launch cannot be correlated to a unique OpenCode child session",
+        });
+        return { action: "allow" };
+      }
       return {
         action: "deny",
         reason: "A concurrent task launch cannot be correlated to a unique OpenCode child session",
@@ -289,9 +302,21 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       }
     },
     "tool.execute.after": async (input, output) => {
-      const subagent = subagentCalls.get(key(input.sessionID, input.callID));
+      const callKey = key(input.sessionID, input.callID);
+      if (uncorrelatedSubagentCalls.delete(callKey)) {
+        const state = sessions.get(input.sessionID);
+        await client.record({
+          event: "acs_subagent_stop_unmapped",
+          ...(state ? { session_id: state.sessionId } : {}),
+          host_session_id: input.sessionID,
+          call_id: input.callID,
+          message: "uncorrelated concurrent task result has no trustworthy subagent lifecycle mapping",
+        });
+        return;
+      }
+      const subagent = subagentCalls.get(callKey);
       if (subagent) {
-        subagentCalls.delete(key(input.sessionID, input.callID));
+        subagentCalls.delete(callKey);
         const metadata = typeof output.metadata === "object" && output.metadata !== null && !Array.isArray(output.metadata)
           ? output.metadata as Record<string, unknown>
           : undefined;
@@ -397,6 +422,9 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         sessions.delete(sessionID);
         for (const requestKey of toolRequests.keys()) {
           if (requestKey.startsWith(`${sessionID}\u0000`)) toolRequests.delete(requestKey);
+        }
+        for (const callKey of uncorrelatedSubagentCalls) {
+          if (callKey.startsWith(`${sessionID}\u0000`)) uncorrelatedSubagentCalls.delete(callKey);
         }
         for (const capabilityKey of protectedCapabilities.keys()) {
           if (capabilityKey.startsWith(`${sessionID}\u0000`)) protectedCapabilities.delete(capabilityKey);

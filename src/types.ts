@@ -62,7 +62,7 @@ export interface AcsResult {
 export interface AcsResponseEnvelope {
   jsonrpc: "2.0";
   id: string | number | null;
-  result?: AcsResult;
+  result?: AcsResult | ServerHello;
   error?: AcsError;
 }
 
