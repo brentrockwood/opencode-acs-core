@@ -9,7 +9,7 @@ It is not a sandbox. An operator who controls OpenCode can remove the plugin, us
 ## What is proven on 1.18.20
 
 - `ALLOW` and `DENY` at the pre-execution hook for built-in `bash`, `read`, `edit`, `write`, and `apply_patch` calls.
-- A denied `task` launch is stopped at the parent tool boundary; this does not establish coverage inside a child session.
+- A fresh foreground `task` is gated as `steps/subagentStart`; denial prevents child creation, while an allowed child is bound through OpenCode's `parentID` session relationship before its first tested tool call. Successful foreground completion emits `steps/subagentStop`. Resume, background completion, and failed/cancelled termination remain outside this claim.
 - Plugin-defined custom tools and an inert local MCP tool reach the same hook with complete fixture arguments and can be denied before their side effects.
 - Allowed results reach `steps/toolCallResult` and retain their request correlation.
 - Parallel sibling calls retain distinct request/result correlations.

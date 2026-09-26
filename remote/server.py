@@ -205,12 +205,12 @@ def handle_acs(request: dict[str, Any]) -> dict[str, Any]:
     key = validate_acs_request(request)
     selected = decide(request)
     record_request(request["params"]["request_id"], request["method"], selected["decision"])
-    result = {
+    result = (selected["payload"] if request["method"] == "handshake/hello" else {
         "type": "final",
         "acs_version": ACS_VERSION,
         "request_id": request["params"]["request_id"],
         **selected,
-    }
+    })
     response = {"jsonrpc": "2.0", "id": request["id"], "result": result}
     result["signature"] = {
         "algorithm": "HMAC-SHA256",

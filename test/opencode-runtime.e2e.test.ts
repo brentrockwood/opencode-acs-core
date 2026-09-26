@@ -377,15 +377,16 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
   let modelServer: ListeningServer | undefined;
   const directories = new Set<string>();
   const guardian = createGuardian((request) => {
-    if (request.method !== "steps/toolCallRequest") return {};
+    if (request.method !== "steps/toolCallRequest" && request.method !== "steps/subagentStart") return {};
     const command = argument(request, "command");
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-deny")) {
+    const payloadText = JSON.stringify(request.params.payload);
+    if (payloadText.includes("acs-deny")) {
       return { result: { decision: "deny", reasoning: "blocked by deterministic Guardian" } };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-malformed")) {
+    if (payloadText.includes("acs-malformed")) {
       return { raw: "not-json" };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-ask")) {
+    if (payloadText.includes("acs-ask")) {
       return {
         result: {
           decision: "ask",
@@ -398,7 +399,7 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
         },
       };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-defer")) {
+    if (payloadText.includes("acs-defer")) {
       return {
         result: {
           decision: "defer",
@@ -578,7 +579,7 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     );
   });
 
-  it("denies a task launch without claiming child-session coverage", async () => {
+  it("denies a task launch at steps/subagentStart before a child is created", async () => {
     const base = await temporary("opencode-acs-task-deny-");
     const offset = guardian.requests.length;
     const result = await runOpenCode(
@@ -591,11 +592,45 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
         subagent_type: "general",
       }),
     );
-    const taskRequest = guardian.requests.slice(offset).find((request) =>
-      request.method === "steps/toolCallRequest" && request.params.payload.tool
-        && (request.params.payload.tool as JsonObject).name === "task");
+    const taskRequest = guardian.requests.slice(offset).find((request) => request.method === "steps/subagentStart");
     expect(taskRequest).toBeDefined();
+    expect(taskRequest?.params.payload.parent_step_id).toBe(taskRequest?.params.request_id);
+    expect(guardian.requests.slice(offset).some((request) =>
+      request.method === "steps/sessionStart"
+      && request.params.metadata.session_id === taskRequest?.params.payload.subagent_session_id)).toBe(false);
     expect(result.stdout).toContain("ACS denied task");
+  });
+
+  it("binds an allowed task child to the ACS subagent session before child tools run", async () => {
+    const base = await temporary("opencode-acs-task-allow-");
+    const target = join(base, "child.txt");
+    const offset = guardian.requests.length;
+    await runOpenCode(
+      base,
+      guardianServer!.url,
+      modelServer!.url,
+      toolPrompt("task", {
+        description: "deterministic child",
+        prompt: `printf child > ${JSON.stringify(target)}`,
+        subagent_type: "general",
+      }),
+    );
+    expect(await readFile(target, "utf8")).toBe("child");
+    const requests = guardian.requests.slice(offset);
+    const startIndex = requests.findIndex((request) => request.method === "steps/subagentStart");
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    const start = requests[startIndex]!;
+    const childAcsID = start.params.payload.subagent_session_id;
+    expect(childAcsID).toMatch(/^[0-9a-f-]{36}$/);
+    const childSessionIndex = requests.findIndex((request) =>
+      request.method === "steps/sessionStart" && request.params.metadata.session_id === childAcsID);
+    const childToolIndex = requests.findIndex((request) =>
+      request.method === "steps/toolCallRequest" && request.params.metadata.session_id === childAcsID);
+    const stop = requests.find((request) => request.method === "steps/subagentStop");
+    expect(childSessionIndex).toBeGreaterThan(startIndex);
+    expect(childToolIndex).toBeGreaterThan(childSessionIndex);
+    expect(stop?.params.payload).toEqual({ subagent_session_id: childAcsID, outcome: "completed" });
+    expect(stop?.params.metadata.session_id).toBe(start.params.metadata.session_id);
   });
 
   it("records that the direct server shell bypasses the model-tool hook", async () => {
