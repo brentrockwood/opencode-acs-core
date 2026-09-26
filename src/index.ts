@@ -349,6 +349,9 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       const subagent = subagentCalls.get(callKey);
       if (subagent) {
         subagentCalls.delete(callKey);
+        if (pendingSubagents.get(input.sessionID) === subagent) {
+          pendingSubagents.delete(input.sessionID);
+        }
         const metadata = typeof output.metadata === "object" && output.metadata !== null && !Array.isArray(output.metadata)
           ? output.metadata as Record<string, unknown>
           : undefined;

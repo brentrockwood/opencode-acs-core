@@ -304,6 +304,51 @@ describe("OpenCode plugin lifecycle", () => {
     ]));
   });
 
+  it("clears an unmatched completed task so a later child can be correlated", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-unmatched-subagent-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    await writeFile(configPath, JSON.stringify({
+      mode: "enforce",
+      startupPosture: "refuse",
+      guardian: {
+        url: "http://127.0.0.1:8787/",
+        hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY",
+        keyId: "test-key",
+      },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian();
+    vi.stubGlobal("fetch", guardian.fetch);
+
+    const hooks = await AcsPlugin({
+      directory,
+      client: { app: { log: vi.fn(async () => undefined) } },
+    } as never);
+    if (!hooks.event || !hooks["tool.execute.before"] || !hooks["tool.execute.after"]) {
+      throw new Error("plugin did not register the required lifecycle hooks");
+    }
+
+    await hooks.event({
+      event: { type: "session.created", properties: { info: { id: "ses_parent" } } },
+    } as never);
+    await hooks["tool.execute.before"](
+      { tool: "task", sessionID: "ses_parent", callID: "call_unmatched" },
+      { args: { description: "unmatched child", prompt: "first", subagent_type: "general" } },
+    );
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "ses_parent", callID: "call_unmatched" },
+      { title: "unmatched child", output: "done", metadata: {} },
+    );
+
+    await expect(hooks["tool.execute.before"](
+      { tool: "task", sessionID: "ses_parent", callID: "call_later" },
+      { args: { description: "later child", prompt: "second", subagent_type: "general" } },
+    )).resolves.toBeUndefined();
+    expect(guardian.requests.filter((request) => request.method === "steps/subagentStart")).toHaveLength(2);
+  });
+
   it("governs skill loading as a generic tool call without fabricating skill lifecycle evidence", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-skill-"));
     temporaryDirectories.add(directory);
