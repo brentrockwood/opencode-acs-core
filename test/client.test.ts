@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcsClient } from "../src/client.js";
 import type { AcsConfig } from "../src/config.js";
 import { newSessionState, toolCallPayload } from "../src/mapper.js";
-import { AcsClientError } from "../src/types.js";
+import { AcsClientError, type ServerHello } from "../src/types.js";
 import { createGuardian, TEST_KEY, TEST_KEY_ID } from "./guardian-helper.js";
 
 function config(timeout = 100, url = "http://127.0.0.1:8787/"): AcsConfig {
@@ -28,7 +28,7 @@ describe("Guardian client", () => {
     delete process.env.OPENCODE_ACS_CLIENT_TEST_KEY;
   });
 
-  it("accepts a direct ServerHello and verifies a signed tool decision", async () => {
+  it("accepts a signed direct ServerHello over HTTP and verifies a signed tool decision", async () => {
     process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
     const guardian = createGuardian((request) => {
       if (request.method === "handshake/hello") return { directHello: true };
@@ -37,7 +37,7 @@ describe("Guardian client", () => {
         : {};
     });
     vi.stubGlobal("fetch", guardian.fetch);
-    const client = new AcsClient(config(100, "https://guardian.example/"));
+    const client = new AcsClient(config());
     const state = newSessionState("ses_local");
     state.handshake = await client.handshake(state);
     const result = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "false" }));
@@ -47,11 +47,32 @@ describe("Guardian client", () => {
 
   it("rejects an unsigned direct ServerHello over HTTP", async () => {
     process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
-    const guardian = createGuardian((request) => request.method === "handshake/hello" ? { directHello: true } : {});
+    const guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { directHello: true, unsignedHello: true }
+      : {});
     vi.stubGlobal("fetch", guardian.fetch);
     const client = new AcsClient(config());
     await expect(client.handshake(newSessionState("ses_local")))
       .rejects.toMatchObject({ kind: "signature" });
+  });
+
+  it("rejects tampered signed direct and legacy wrapped ServerHello responses", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    let guardian = createGuardian();
+    const signedFetch = guardian.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await signedFetch(input, init);
+      const value = await response.json() as { result?: ServerHello };
+      if (value.result?.negotiated_version) value.result.on_decision_failure = "proceed";
+      return Response.json(value);
+    });
+    await expect(new AcsClient(config()).handshake(newSessionState("ses_tampered")))
+      .rejects.toMatchObject({ kind: "signature" });
+
+    guardian = createGuardian((request) => request.method === "handshake/hello" ? { legacyHello: true } : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    await expect(new AcsClient(config()).handshake(newSessionState("ses_legacy")))
+      .rejects.toMatchObject({ kind: "invalid_schema" });
   });
 
   it("categorizes malformed JSON", async () => {

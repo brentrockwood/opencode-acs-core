@@ -40,8 +40,10 @@ export class AcsClient {
 
   async handshake(state: SessionState): Promise<ServerHello> {
     const result = await this.exchange(state, "handshake/hello", clientHello(), this.config.guardian.connectTimeoutMs);
-    const payload = isServerHello(result) ? result : result.payload;
-    if (!payload) throw new AcsClientError("invalid_schema", "handshake response has no ServerHello payload");
+    if (!isServerHello(result)) {
+      throw new AcsClientError("invalid_schema", "handshake/hello must return ServerHello directly in result");
+    }
+    const payload = result;
     try {
       validateServerHello(payload);
     } catch (error) {
@@ -181,8 +183,17 @@ export class AcsClient {
       if (method !== "handshake/hello") {
         throw new AcsClientError("invalid_schema", "Guardian returned ServerHello outside handshake/hello");
       }
-      if (new URL(this.config.guardian.url).protocol !== "https:") {
-        throw new AcsClientError("signature", "Direct ServerHello requires an authenticated HTTPS Guardian transport");
+      const signature = response.result.signature;
+      if (sessionKey) {
+        if (
+          !signature
+          || signature.key_id !== this.config.guardian.keyId
+          || !verifyEnvelope(response, sessionKey, signature)
+        ) {
+          throw new AcsClientError("signature", "Direct ServerHello signature is missing or invalid");
+        }
+      } else if (new URL(this.config.guardian.url).protocol !== "https:") {
+        throw new AcsClientError("signature", "Unsigned direct ServerHello requires an authenticated HTTPS Guardian transport");
       }
       return response.result;
     }

@@ -9,6 +9,9 @@ export interface GuardianReply {
   raw?: string;
   delayMs?: number;
   directHello?: boolean;
+  legacyHello?: boolean;
+  unsignedHello?: boolean;
+  methodsEvaluated?: string[];
   result?: Omit<AcsResult, "type" | "acs_version" | "request_id">;
   error?: Omit<AcsError, "signature">;
 }
@@ -70,12 +73,16 @@ export function createGuardian(reply: (request: AcsRequestEnvelope) => GuardianR
       if (request.method !== "system/ping") error.signature = signEnvelope(response, key, TEST_KEY_ID);
       return Response.json(response, { status: selected.status ?? 200 });
     }
-    if (request.method === "handshake/hello" && selected.directHello === true) {
-      const response: AcsResponseEnvelope = { jsonrpc: "2.0", id: request.id, result: helloPayload(request, "https") };
+    const transport = new URL(String(_input)).protocol === "https:" ? "https" : "http";
+    const hello = helloPayload(request, transport);
+    if (selected.methodsEvaluated) hello.methods_evaluated = [...selected.methodsEvaluated];
+    if (request.method === "handshake/hello" && selected.legacyHello !== true) {
+      const response: AcsResponseEnvelope = { jsonrpc: "2.0", id: request.id, result: hello };
+      if (!selected.unsignedHello) hello.signature = signEnvelope(response, key, TEST_KEY_ID);
       return Response.json(response, { status: selected.status ?? 200 });
     }
     const decision = request.method === "handshake/hello"
-      ? { decision: "allow" as const, payload: helloPayload(request) }
+      ? { decision: "allow" as const, payload: hello }
       : selected.result ?? { decision: "allow" as const };
     const result = {
       type: "final",

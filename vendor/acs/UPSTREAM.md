@@ -10,8 +10,10 @@
 The complete `specification/v0.1.0` schema directory is copied without local
 modification. `acs_schema.json` is the upstream aggregator from that directory.
 
-The current upstream PR #22 head, `7174a033c15f69ee58caaa5eb0a19279592171c7`,
+The current upstream PR #22 head, `4bdf367916a94ade4577bc9b3a38eae25072faed`,
 contains reference adapters but no normative schema changes. In particular,
 signed JSON-RPC error envelopes remain reference-adapter behavior rather than
 an explicit `error.signature` property in the schema. The schema still accepts
 that property because `JsonRpcError` does not close additional properties.
+That reference revision also returns a signed `ServerHello` directly in the
+JSON-RPC result and skips methods omitted from `methods_evaluated`.

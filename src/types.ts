@@ -77,6 +77,7 @@ export interface ServerHello {
   negotiated_version: string;
   methods_evaluated: string[];
   selected_transport: "http" | "https" | "stdio";
+  signature?: AcsSignature;
   signature_algorithms_supported?: string[];
   timeout_config: {
     default_ms: number;

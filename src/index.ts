@@ -24,7 +24,7 @@ interface PendingSubagent {
   callID: string;
   expectedTitle?: string;
   state: SessionState;
-  startRequestId: string;
+  startRequestId?: string;
   boundHostSessionID?: string;
 }
 
@@ -47,6 +47,21 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
     }).catch(() => undefined);
   }
 
+  async function skipUnevaluated(
+    state: SessionState,
+    method: string,
+    fields: Record<string, unknown> = {},
+  ): Promise<boolean> {
+    if (client.isEvaluated(state, method)) return false;
+    await client.record({
+      event: "acs_unevaluated_allow",
+      session_id: state.sessionId,
+      method,
+      ...fields,
+    });
+    return true;
+  }
+
   async function initialize(sessionID: string, preparedState?: SessionState): Promise<SessionState> {
     const pending = starts.get(sessionID);
     if (pending) return pending;
@@ -59,15 +74,17 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       try {
         state.handshake = await client.handshake(state);
         state.guarded = true;
-        const result = await client.request(state, "steps/sessionStart", {});
-        if (client.isEvaluated(state, "steps/sessionStart") && result.decision !== "allow") {
-          state.refuseActions = config.mode === "enforce";
-          await client.record({
-            event: "acs_session_start_rejected",
-            session_id: state.sessionId,
-            host_session_id: sessionID,
-            decision: result.decision,
-          });
+        if (!await skipUnevaluated(state, "steps/sessionStart", { host_session_id: sessionID })) {
+          const result = await client.request(state, "steps/sessionStart", {});
+          if (result.decision !== "allow") {
+            state.refuseActions = config.mode === "enforce";
+            await client.record({
+              event: "acs_session_start_rejected",
+              session_id: state.sessionId,
+              host_session_id: sessionID,
+              decision: result.decision,
+            });
+          }
         }
       } catch (error) {
         state.guarded = false;
@@ -119,7 +136,8 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       };
     }
 
-    const startRequestId = randomUUID();
+    const startEvaluated = client.isEvaluated(parent, "steps/subagentStart");
+    const startRequestId = startEvaluated ? randomUUID() : undefined;
     const child = newSessionState(`pending:${callID}`);
     const pending: PendingSubagent = {
       callID,
@@ -127,12 +145,20 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         ? { expectedTitle: `${args.description} (@${String(args.subagent_type)} subagent)` }
         : {}),
       state: child,
-      startRequestId,
+      ...(startRequestId ? { startRequestId } : {}),
     };
     pendingSubagents.set(sessionID, pending);
     subagentCalls.set(key(sessionID, callID), pending);
 
     try {
+      if (!startEvaluated) {
+        await skipUnevaluated(parent, "steps/subagentStart", {
+          host_session_id: sessionID,
+          call_id: callID,
+        });
+        return { action: "allow" };
+      }
+      if (!startRequestId) throw new Error("evaluated subagentStart has no request id");
       const result = await client.request(
         parent,
         "steps/subagentStart",
@@ -140,9 +166,9 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         undefined,
         startRequestId,
       );
-      if (!client.isEvaluated(parent, "steps/subagentStart") || config.mode === "observe") {
+      if (config.mode === "observe") {
         await client.record({
-          event: config.mode === "observe" ? "acs_observe_only" : "acs_unevaluated_allow",
+          event: "acs_observe_only",
           session_id: parent.sessionId,
           host_session_id: sessionID,
           call_id: callID,
@@ -168,19 +194,19 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       if (blocks) {
         pendingSubagents.delete(sessionID);
         subagentCalls.delete(key(sessionID, callID));
-        return { action: "deny", reason: `ACS decision failure: ${message(error)}`, requestId: startRequestId };
+        return { action: "deny", reason: `ACS decision failure: ${message(error)}`, ...(startRequestId ? { requestId: startRequestId } : {}) };
       }
       await client.record({
         event: "acs_fail_open",
         session_id: parent.sessionId,
         host_session_id: sessionID,
         call_id: callID,
-        request_id: startRequestId,
+        ...(startRequestId ? { request_id: startRequestId } : {}),
         method: "steps/subagentStart",
         failure_kind: error instanceof AcsClientError ? error.kind : "transport",
         message: message(error),
       });
-      return { action: "allow", requestId: startRequestId };
+      return { action: "allow", ...(startRequestId ? { requestId: startRequestId } : {}) };
     }
   }
 
@@ -195,13 +221,19 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       return { action: "deny", reason: "ACS session is not guarded and startup posture is refuse" };
     }
     try {
+      if (await skipUnevaluated(state, "steps/toolCallRequest", {
+        host_session_id: sessionID,
+        call_id: callID,
+      })) {
+        return { action: "allow" };
+      }
       const decisionArgs = tool === PROTECTED_TOOL
         ? Object.fromEntries(Object.entries(args).filter(([name]) => name !== "capability"))
         : args;
       const result = await client.request(state, "steps/toolCallRequest", toolCallPayload(tool, decisionArgs));
-      if (!client.isEvaluated(state, "steps/toolCallRequest") || config.mode === "observe") {
+      if (config.mode === "observe") {
         await client.record({
-          event: config.mode === "observe" ? "acs_observe_only" : "acs_unevaluated_allow",
+          event: "acs_observe_only",
           session_id: state.sessionId,
           host_session_id: sessionID,
           call_id: callID,
@@ -329,18 +361,24 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           && reportedParentID === input.sessionID
           && reportedChildID === subagent.boundHostSessionID
         ) {
-          await client.request(state, "steps/subagentStop", subagentStopPayload(subagent.state, "completed"))
-            .catch(async (error) => {
-              await client.record({
-                event: "acs_subagent_stop_observation_failure",
-                session_id: state.sessionId,
-                host_session_id: input.sessionID,
-                call_id: input.callID,
-                subagent_session_id: subagent.state.sessionId,
-                failure_kind: error instanceof AcsClientError ? error.kind : "transport",
-                message: message(error),
+          if (!await skipUnevaluated(state, "steps/subagentStop", {
+            host_session_id: input.sessionID,
+            call_id: input.callID,
+            subagent_session_id: subagent.state.sessionId,
+          })) {
+            await client.request(state, "steps/subagentStop", subagentStopPayload(subagent.state, "completed"))
+              .catch(async (error) => {
+                await client.record({
+                  event: "acs_subagent_stop_observation_failure",
+                  session_id: state.sessionId,
+                  host_session_id: input.sessionID,
+                  call_id: input.callID,
+                  subagent_session_id: subagent.state.sessionId,
+                  failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+                  message: message(error),
+                });
               });
-            });
+          }
         } else {
           await client.record({
             event: "acs_subagent_stop_unmapped",
@@ -370,6 +408,11 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         tool: input.tool,
         exit_status: resultPayload.exit_status,
       });
+      if (await skipUnevaluated(state, "steps/toolCallResult", {
+        host_session_id: input.sessionID,
+        call_id: input.callID,
+        tool: input.tool,
+      })) return;
       try {
         await client.request(
           state,
@@ -410,7 +453,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
             host_session_id: sessionID,
             parent_host_session_id: parentID,
             call_id: pending.callID,
-            request_id: pending.startRequestId,
+            ...(pending.startRequestId ? { request_id: pending.startRequestId } : {}),
           });
           await initialize(sessionID, pending.state);
         } else {
@@ -435,10 +478,12 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           subagentCalls.delete(key(sessionID, pendingSubagent.callID));
         }
         if (state?.guarded) {
-          await client.request(state, "steps/sessionEnd", {
-            reason: "abandoned",
-            ...(state.chainHash ? { final_chain_hash: state.chainHash } : {}),
-          }).catch(() => undefined);
+          if (!await skipUnevaluated(state, "steps/sessionEnd", { host_session_id: sessionID })) {
+            await client.request(state, "steps/sessionEnd", {
+              reason: "abandoned",
+              ...(state.chainHash ? { final_chain_hash: state.chainHash } : {}),
+            }).catch(() => undefined);
+          }
         }
       }
     },

@@ -55,6 +55,117 @@ describe("OpenCode plugin lifecycle", () => {
     expect(guardian.requests.filter((request) => request.method === "handshake/hello")).toHaveLength(2);
   });
 
+  it("skips unevaluated tool requests and omits dangling result correlation", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-unevaluated-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    const auditPath = join(directory, "audit.jsonl");
+    await writeFile(configPath, JSON.stringify({
+      mode: "enforce",
+      startupPosture: "refuse",
+      guardian: {
+        url: "http://127.0.0.1:8787/",
+        hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY",
+        keyId: "test-key",
+      },
+      audit: { path: auditPath },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { methodsEvaluated: ["steps/sessionStart", "steps/toolCallResult"] }
+      : request.method === "steps/toolCallRequest"
+        ? { error: { code: -32601, message: "method not evaluated" } }
+        : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+
+    const hooks = await AcsPlugin({
+      directory,
+      client: { app: { log: vi.fn(async () => undefined) } },
+    } as never);
+    if (!hooks.event || !hooks["tool.execute.before"] || !hooks["tool.execute.after"]) {
+      throw new Error("plugin did not register the required lifecycle hooks");
+    }
+    await hooks.event({
+      event: { type: "session.created", properties: { info: { id: "ses_unevaluated" } } },
+    } as never);
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID: "ses_unevaluated", callID: "call_unevaluated" },
+      { args: { command: "true" } },
+    );
+    await hooks["tool.execute.after"](
+      { tool: "bash", sessionID: "ses_unevaluated", callID: "call_unevaluated" },
+      { title: "true", output: "", metadata: { exit: 0 } },
+    );
+
+    expect(guardian.requests.some((request) => request.method === "steps/toolCallRequest")).toBe(false);
+    const result = guardian.requests.find((request) => request.method === "steps/toolCallResult");
+    expect(result).toBeDefined();
+    expect(result?.params.payload.request_id_ref).toBeUndefined();
+    const audit = (await readFile(auditPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(audit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "acs_unevaluated_allow", method: "steps/toolCallRequest" }),
+    ]));
+  });
+
+  it("binds a real child session when subagentStart is unevaluated without inventing a request id", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-unevaluated-subagent-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    const auditPath = join(directory, "audit.jsonl");
+    await writeFile(configPath, JSON.stringify({
+      mode: "enforce",
+      startupPosture: "refuse",
+      guardian: {
+        url: "http://127.0.0.1:8787/",
+        hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY",
+        keyId: "test-key",
+      },
+      audit: { path: auditPath },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { methodsEvaluated: ["steps/sessionStart", "steps/subagentStop"] }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+
+    const hooks = await AcsPlugin({
+      directory,
+      client: { app: { log: vi.fn(async () => undefined) } },
+    } as never);
+    if (!hooks.event || !hooks["tool.execute.before"] || !hooks["tool.execute.after"]) {
+      throw new Error("plugin did not register the required lifecycle hooks");
+    }
+    await hooks.event({
+      event: { type: "session.created", properties: { info: { id: "ses_parent" } } },
+    } as never);
+    await hooks["tool.execute.before"](
+      { tool: "task", sessionID: "ses_parent", callID: "call_task" },
+      { args: { description: "child", prompt: "inspect", subagent_type: "general" } },
+    );
+    await hooks.event({
+      event: {
+        type: "session.created",
+        properties: { info: { id: "ses_child", parentID: "ses_parent", title: "child (@general subagent)" } },
+      },
+    } as never);
+    await hooks["tool.execute.after"](
+      { tool: "task", sessionID: "ses_parent", callID: "call_task" },
+      { title: "child", output: "done", metadata: { parentSessionId: "ses_parent", sessionId: "ses_child" } },
+    );
+
+    expect(guardian.requests.some((request) => request.method === "steps/subagentStart")).toBe(false);
+    expect(guardian.requests.some((request) => request.method === "steps/subagentStop")).toBe(true);
+    const audit = (await readFile(auditPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(audit).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event: "acs_unevaluated_allow", method: "steps/subagentStart" }),
+    ]));
+    const bound = audit.find((event) => event.event === "acs_subagent_session_bound");
+    expect(bound).toBeDefined();
+    expect(bound?.request_id).toBeUndefined();
+  });
+
   it("gates a fresh task as subagentStart and binds the created child session", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-subagent-"));
     temporaryDirectories.add(directory);
