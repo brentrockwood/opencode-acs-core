@@ -55,7 +55,9 @@ The default posture is unchanged by this classification. The upstream proposal t
 
 ## Audit privacy
 
-Payload bodies are omitted by default because tool arguments and results can contain source code, credentials, user data, and file contents. Enabling payloads is an explicit privacy decision. The optional local JSONL file is controlled by the same local operator and is not tamper-resistant evidence.
+Payload bodies and message text are omitted by default because tool arguments, results and Guardian error text can contain source code, credentials, user data, and file contents. Enabling payloads is an explicit privacy decision that also writes message text. The optional local JSONL file is controlled by the same local operator and is not tamper-resistant evidence.
+
+Without `audit.path`, decision-failure records are written to stderr. When a configured file cannot be written, the record also falls back to stderr. The stderr fallback always omits payload and message text, including when an opted-in file sink fails. Failure class, kind, disposition and correlation IDs remain available in every record.
 
 ## Protected resources
 
@@ -67,4 +69,3 @@ This establishes the remote capability flow and keeps the resource-signing key o
 
 Do not include Guardian keys, captured payloads, or sensitive workspace data in a report. This repository currently has no published security contact or coordinated disclosure commitment.
 
-Audit message text is omitted along with payloads unless file payload logging is explicitly enabled. Stderr fallback always omits both, including when an opted-in file sink fails. Failure class, kind and correlation IDs remain available.
