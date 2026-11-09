@@ -5,15 +5,15 @@ import type { AcsRequestEnvelope, AcsResponseEnvelope, AcsSignature } from "./ty
 type SignableEnvelope = AcsRequestEnvelope | AcsResponseEnvelope;
 
 export function deriveSessionKey(inputKeyMaterial: string, sessionId: string): Buffer {
-  // ACS v0.1 requires HKDF with the session_id but does not fix salt/info byte
-  // strings. This adapter publishes its deterministic choice for its demo
-  // Guardian and treats it as an implementation detail, not an ACS mandate.
+  const secret = Buffer.from(inputKeyMaterial, "utf8");
+  if (secret.length < 32) throw new Error("HMAC secret must contain at least 32 UTF-8 bytes");
+  // ACS §10: empty salt, exact transmitted session_id as UTF-8 info.
   return Buffer.from(
     hkdfSync(
       "sha256",
-      Buffer.from(inputKeyMaterial, "utf8"),
+      secret,
+      Buffer.alloc(0),
       Buffer.from(sessionId, "utf8"),
-      Buffer.from("opencode-acs-core/v0.1.0/HMAC-SHA256", "utf8"),
       32,
     ),
   );

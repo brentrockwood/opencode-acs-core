@@ -95,9 +95,14 @@ export interface SessionState {
   hostSessionId: string;
   chainHash?: string;
   handshake?: ServerHello;
+  decisionFailures?: Partial<Record<DecisionFailureClass, number>>;
   guarded: boolean;
   refuseActions: boolean;
 }
+
+export type DecisionFailureClass =
+  | "timeout" | "unreachable" | "malformed_response" | "guardian_error"
+  | "observed_agent_error" | "signature_invalid" | "handshake_failure" | "other";
 
 export type AcsFailureKind =
   | "configuration"

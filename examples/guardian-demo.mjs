@@ -6,15 +6,17 @@ const port = Number(process.env.OPENCODE_ACS_DEMO_PORT ?? "8787");
 const inputKeyMaterial = process.env.OPENCODE_ACS_HMAC_KEY;
 const keyId = process.env.OPENCODE_ACS_KEY_ID ?? "demo-key-id";
 
-if (!inputKeyMaterial) throw new Error("OPENCODE_ACS_HMAC_KEY is required");
+if (!inputKeyMaterial || Buffer.byteLength(inputKeyMaterial, "utf8") < 32) {
+  throw new Error("OPENCODE_ACS_HMAC_KEY must contain at least 32 UTF-8 bytes");
+}
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("OPENCODE_ACS_DEMO_PORT is invalid");
 
 function sessionKey(sessionId) {
   return Buffer.from(hkdfSync(
     "sha256",
     Buffer.from(inputKeyMaterial, "utf8"),
+    Buffer.alloc(0),
     Buffer.from(sessionId, "utf8"),
-    Buffer.from("opencode-acs-core/v0.1.0/HMAC-SHA256", "utf8"),
     32,
   ));
 }

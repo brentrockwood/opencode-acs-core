@@ -45,6 +45,8 @@ export { AcsPlugin } from "/absolute/path/to/acs-core/opencode/src/index.ts";
 
 Copy [examples/config.json](examples/config.json) to `.opencode/acs-core.json`, replace the endpoint and key names, then provide the HMAC key through the configured environment variable. Enforce mode requires both a key environment-variable name and a key ID. Non-loopback Guardian endpoints must use HTTPS.
 
+HMAC follows merged ACS §10: HKDF-SHA256 with empty salt, the exact transmitted `session_id` as UTF-8 info (no normalization), and 32-byte output. The configured secret must contain at least 32 UTF-8 bytes from a cryptographically secure random source, not a passphrase. Configuration remains literal UTF-8 text; base64-looking values are not decoded, and `keyId` remains the configured opaque label. Upgrade adapters and Guardians, including the local and remote demos, together. There is no fallback to the old adapter-specific derivation.
+
 When `protectedResource` is configured, the plugin also registers `acs_protected_append`. A signed Guardian `ALLOW` must include a capability before the tool can execute. The fixed resource endpoint then verifies the capability independently. See [examples/remote-config.json](examples/remote-config.json) and [docs/protected-resource.md](docs/protected-resource.md).
 
 No configuration means no plugin behavior. `observe` mode never blocks. `enforce` mode requires an explicit `startupPosture`; `refuse` is the example posture.
@@ -66,3 +68,9 @@ Local audit writing is passive: a write failure does not change an enforcement d
 This is an experimental adapter, not an official OpenCode integration, not an OWASP-endorsed implementation, and not a claim of ACS conformance. It is not being published to npm as part of this work.
 
 The deployed demonstration establishes the remote capability protocol and withholds the resource-signing key from OpenCode. It does not establish that the workstation lacks another authorization path: the workstation operator retains administrative SSH access to the deployment host, and an unsandboxed process running as that user may be able to use it. The demonstrated claim is therefore the enrolled ACS tool path, not resistance to the local process or human operator through every available route.
+
+### Decision-failure audit
+
+Failed exchanges are recorded under both failure postures and counted per session in `summary.decision_failures` at session end. Without `audit.path`, these records go to stderr; failed file writes also fall back to stderr. Capture that stream if no writable audit file is configured. Audit delivery does not change enforcement and is not guaranteed durable.
+
+Audit message text is omitted along with payloads unless file payload logging is explicitly enabled. Stderr fallback always omits both, including when an opted-in file sink fails. Failure class, kind and correlation IDs remain available.

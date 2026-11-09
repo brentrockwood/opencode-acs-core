@@ -17,7 +17,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 ACS_VERSION = "0.1.0"
-HKDF_INFO = b"opencode-acs-core/v0.1.0/HMAC-SHA256"
 PROTECTED_TOOL = "acs_protected_append"
 PROTECTED_ACTION = "append"
 PROTECTED_RESOURCE = "remote:acs-demo-log"
@@ -32,6 +31,8 @@ HOST = os.environ.get("ACS_DEMO_HOST", "127.0.0.1")
 PORT = int(os.environ.get("ACS_DEMO_PORT", "8788"))
 DATABASE = os.environ.get("ACS_DEMO_DATABASE", "/var/lib/opencode-acs-demo/state.sqlite3")
 CLIENT_KEY = os.environ["ACS_DEMO_CLIENT_KEY"]
+if len(CLIENT_KEY.encode("utf-8")) < 32:
+    raise ValueError("ACS_DEMO_CLIENT_KEY must contain at least 32 UTF-8 bytes")
 CLIENT_KEY_ID = os.environ["ACS_DEMO_CLIENT_KEY_ID"]
 RESOURCE_KEY = base64.urlsafe_b64decode(os.environ["ACS_DEMO_RESOURCE_KEY"] + "===")
 
@@ -56,8 +57,8 @@ def without_signature(envelope: dict[str, Any]) -> dict[str, Any]:
 
 
 def hkdf_session_key(session_id: str) -> bytes:
-    prk = hmac.new(session_id.encode(), CLIENT_KEY.encode(), hashlib.sha256).digest()
-    return hmac.new(prk, HKDF_INFO + b"\x01", hashlib.sha256).digest()
+    prk = hmac.new(b"", CLIENT_KEY.encode("utf-8"), hashlib.sha256).digest()
+    return hmac.new(prk, session_id.encode("utf-8") + b"\x01", hashlib.sha256).digest()
 
 
 def envelope_signature(envelope: dict[str, Any], key: bytes) -> str:

@@ -31,7 +31,7 @@ Deployments that expose the OpenCode server must separately disable or isolate u
 
 ## Transport and keys
 
-Enforce mode requires HMAC-SHA256 request and response authentication. Session keys are derived from configured input key material and the canonical ACS session UUID. Keys are read from an environment variable named in configuration and are never accepted in the Guardian URL. The adapter refuses non-loopback plaintext HTTP in enforce mode.
+Enforce mode requires HMAC-SHA256 request and response authentication. Session keys use HKDF-SHA256 with empty salt, the exact transmitted ACS session ID as UTF-8 info without normalization, and 32-byte output. Configured secrets are literal UTF-8 text and must contain at least 32 bytes from a cryptographically secure random source, not a passphrase. Length is checked; randomness cannot be checked. Keys are read from an environment variable named in configuration and are never accepted in the Guardian URL. The adapter refuses non-loopback plaintext HTTP in enforce mode.
 
 HMAC authenticates a peer that knows the shared secret; it does not establish independent operator identity. Production key injection and rotation are deployment responsibilities. A production deployment should use HTTPS even on networks considered private.
 
@@ -39,7 +39,7 @@ Requests include UUID request IDs, timestamps, nonces, and session chain hashes 
 
 ## Failure behavior
 
-Enforce mode requires the startup posture to be explicit. Under `refuse`, an unavailable or invalid Guardian blocks tool execution. After a successful handshake, the Guardian's negotiated `on_decision_failure` value selects proceed or deny behavior. Every fail-open event is written to the configured audit sink when possible.
+Enforce mode requires the startup posture to be explicit. Under `refuse`, an unavailable or invalid Guardian blocks tool execution. After a successful handshake, the Guardian's negotiated `on_decision_failure` value selects proceed or deny behavior. Every failed exchange is recorded under both postures. Without a file path, failure records go to stderr; a failed file write also falls back to stderr without changing enforcement. Operators must capture stderr or provide a writable audit file. This is not a durable-delivery guarantee.
 
 `ASK` and `DEFER` fail closed. There is no fallback to a local approval prompt because that would not be independent authorization. `MODIFY` fails closed unless it is enabled and contains exactly one supported Bash command replacement.
 
@@ -56,3 +56,5 @@ This establishes the remote capability flow and keeps the resource-signing key o
 ## Reporting
 
 Do not include Guardian keys, captured payloads, or sensitive workspace data in a report. This repository currently has no published security contact or coordinated disclosure commitment.
+
+Audit message text is omitted along with payloads unless file payload logging is explicitly enabled. Stderr fallback always omits both, including when an opted-in file sink fails. Failure class, kind and correlation IDs remain available.

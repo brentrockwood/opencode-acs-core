@@ -16,6 +16,39 @@ afterEach(async () => {
 });
 
 describe("OpenCode plugin lifecycle", () => {
+  it.each([
+    { posture: "deny" as const, fails: false, blocked: false },
+    { posture: "proceed" as const, fails: true, blocked: false },
+    { posture: "deny" as const, fails: true, blocked: true },
+  ])("preserves enforcement with an unwritable audit file: %j", async ({ posture, fails, blocked }) => {
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const directory = await mkdtemp(join(tmpdir(), "opencode-acs-audit-posture-"));
+    temporaryDirectories.add(directory);
+    const configPath = join(directory, "acs.json");
+    await writeFile(configPath, JSON.stringify({
+      mode: "enforce", startupPosture: "refuse",
+      guardian: { url: "http://127.0.0.1:8787/", hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY", keyId: "test-key" },
+      audit: { path: directory },
+    }));
+    process.env.OPENCODE_ACS_CONFIG = configPath;
+    process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { onDecisionFailure: posture }
+      : fails && request.method === "steps/toolCallRequest" ? { raw: "{" } : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const hooks = await AcsPlugin({ directory, client: { app: { log: vi.fn(async () => undefined) } } } as never);
+    const action = hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_audit", callID: "probe" }, { args: { command: "pwd" } },
+    );
+    if (blocked) await expect(action).rejects.toThrow();
+    else await expect(action).resolves.toBeUndefined();
+    const failures = stderr.mock.calls.map(([line]) => JSON.parse(String(line))).filter((record) => record.event === "acs_decision_failure");
+    expect(failures).toHaveLength(fails ? 1 : 0);
+    await hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "ses_audit" } } } } as never);
+    expect(guardian.requests.at(-1)?.params.payload.summary).toEqual({ decision_failures: fails ? { malformed_response: 1 } : {} });
+    stderr.mockRestore();
+  });
+
   it("sends a schema-valid sessionEnd and reinitializes a deleted host session", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-"));
     temporaryDirectories.add(directory);
@@ -31,7 +64,7 @@ describe("OpenCode plugin lifecycle", () => {
     }));
     process.env.OPENCODE_ACS_CONFIG = configPath;
     process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
-    const guardian = createGuardian();
+    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest" ? { raw: "{" } : {});
     vi.stubGlobal("fetch", guardian.fetch);
 
     const hooks = await AcsPlugin({
@@ -43,16 +76,25 @@ describe("OpenCode plugin lifecycle", () => {
     await hooks.event({
       event: { type: "session.created", properties: { info: { id: "ses_host" } } },
     } as never);
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_host", callID: "failed" },
+      { args: { command: "pwd" } },
+    )).rejects.toThrow();
     await hooks.event({
       event: { type: "session.deleted", properties: { info: { id: "ses_host" } } },
     } as never);
     const ended = guardian.requests.find((request) => request.method === "steps/sessionEnd");
-    expect(ended?.params.payload).toEqual({ reason: "abandoned" });
+    expect(ended?.params.payload).toEqual({ reason: "abandoned", summary: { decision_failures: { malformed_response: 1 } } });
 
     await hooks.event({
       event: { type: "session.created", properties: { info: { id: "ses_host" } } },
     } as never);
     expect(guardian.requests.filter((request) => request.method === "handshake/hello")).toHaveLength(2);
+    await hooks.event({
+      event: { type: "session.deleted", properties: { info: { id: "ses_host" } } },
+    } as never);
+    expect(guardian.requests.filter((request) => request.method === "steps/sessionEnd").at(-1)?.params.payload.summary)
+      .toEqual({ decision_failures: {} });
   });
 
   it("skips unevaluated tool requests and omits dangling result correlation", async () => {

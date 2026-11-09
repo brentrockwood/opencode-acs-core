@@ -1,5 +1,5 @@
 import type { AcsConfig } from "./config.js";
-import { AuditSink } from "./audit.js";
+import { AuditSink, decisionFailureClass } from "./audit.js";
 import { deriveSessionKey, signEnvelope, verifyEnvelope } from "./crypto.js";
 import { METHODS_IMPLEMENTED, buildRequest, clientHello } from "./mapper.js";
 import { validateRequest, validateResponse, validateServerHello } from "./schema.js";
@@ -32,6 +32,9 @@ export class AcsClient {
     if (keyEnvironment && !this.inputKeyMaterial) {
       throw new AcsClientError("configuration", `environment variable ${keyEnvironment} is not set`);
     }
+    if (this.inputKeyMaterial !== undefined && Buffer.byteLength(this.inputKeyMaterial, "utf8") < 32) {
+      throw new AcsClientError("configuration", `environment variable ${keyEnvironment} must contain at least 32 UTF-8 bytes`);
+    }
   }
 
   get signed(): boolean {
@@ -40,6 +43,13 @@ export class AcsClient {
 
   async handshake(state: SessionState): Promise<ServerHello> {
     const result = await this.exchange(state, "handshake/hello", clientHello(), this.config.guardian.connectTimeoutMs);
+    if (!isServerHello(result)) {
+      throw new AcsClientError("invalid_schema", "handshake/hello must return ServerHello directly in result");
+    }
+    return result;
+  }
+
+  private validateHello(result: AcsResult | ServerHello): ServerHello {
     if (!isServerHello(result)) {
       throw new AcsClientError("invalid_schema", "handshake/hello must return ServerHello directly in result");
     }
@@ -103,8 +113,42 @@ export class AcsClient {
     const current = new Promise<void>((resolve) => { release = resolve; });
     this.requestQueues.set(state.sessionId, current);
     await previous.catch(() => undefined);
+    let request: AcsRequestEnvelope | undefined;
+    let requestValid = false;
     try {
-      return await this.performRequest(state, method, payload, explicitTimeout, explicitRequestId);
+      if (method === "steps/sessionEnd") {
+        payload = {
+          ...payload,
+          summary: { ...(payload.summary as JsonObject | undefined), decision_failures: { ...state.decisionFailures } },
+          ...(state.chainHash ? { final_chain_hash: state.chainHash } : {}),
+        };
+      }
+      request = buildRequest(this.config, state, method, payload, explicitRequestId);
+      if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 1_048_576) {
+        throw new AcsClientError("request_too_large", "ACS payload exceeds the advertised 1048576-byte limit");
+      }
+      validateRequest(request);
+      requestValid = true;
+      const result = await this.performRequest(state, request, explicitTimeout);
+      return method === "handshake/hello" ? this.validateHello(result) : result;
+    } catch (error) {
+      const failureClass = method === "handshake/hello"
+        ? "handshake_failure"
+        : requestValid ? decisionFailureClass(error) : "observed_agent_error";
+      state.decisionFailures ??= {};
+      state.decisionFailures[failureClass] = (state.decisionFailures[failureClass] ?? 0) + 1;
+      await this.audit.write({
+        event: "acs_decision_failure",
+        session_id: state.sessionId,
+        ...(request ? { request_id: request.params.request_id } : {}),
+        method,
+        failure_class: failureClass,
+        failure_kind: error instanceof AcsClientError ? error.kind : "other",
+        posture: method === "handshake/hello" ? this.config.startupPosture : this.failurePosture(state),
+        message: `ACS exchange failed: ${failureClass}`,
+      });
+      if (!requestValid && !(error instanceof AcsClientError)) throw new AcsClientError("invalid_schema", String(error), error);
+      throw error;
     } finally {
       release();
       if (this.requestQueues.get(state.sessionId) === current) this.requestQueues.delete(state.sessionId);
@@ -113,23 +157,13 @@ export class AcsClient {
 
   private async performRequest(
     state: SessionState,
-    method: string,
-    payload: JsonObject,
+    request: AcsRequestEnvelope,
     explicitTimeout?: number,
-    explicitRequestId?: string,
   ): Promise<AcsResult | ServerHello> {
-    const request = buildRequest(this.config, state, method, payload, explicitRequestId);
-    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 1_048_576) {
-      throw new AcsClientError("request_too_large", "ACS payload exceeds the advertised 1048576-byte limit");
-    }
+    const { method } = request;
     const sessionKey = this.inputKeyMaterial ? deriveSessionKey(this.inputKeyMaterial, state.sessionId) : undefined;
     if (sessionKey && this.config.guardian.keyId && method !== "system/ping") {
       request.params.signature = signEnvelope(request, sessionKey, this.config.guardian.keyId);
-    }
-    try {
-      validateRequest(request);
-    } catch (error) {
-      throw new AcsClientError("invalid_schema", (error as Error).message, error);
     }
 
     const timeout = explicitTimeout ?? state.handshake?.timeout_config.per_method_ms?.[method]
@@ -145,20 +179,7 @@ export class AcsClient {
       signed: Boolean(request.params.signature),
     });
 
-    let response: AcsResponseEnvelope;
-    try {
-      response = await this.fetchResponse(request, timeout);
-    } catch (error) {
-      await this.audit.write({
-        event: "acs_decision_failure",
-        session_id: state.sessionId,
-        request_id: request.params.request_id,
-        method,
-        failure_kind: error instanceof AcsClientError ? error.kind : "transport",
-        message: (error as Error).message,
-      });
-      throw error;
-    }
+    const response = await this.fetchResponse(request, timeout);
 
     try {
       validateResponse(response);
