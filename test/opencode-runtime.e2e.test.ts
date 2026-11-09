@@ -307,9 +307,16 @@ async function runDirectServerShell(
   guardianUrl: string,
   modelUrl: string,
   command: string,
-): Promise<{ response: string; stdout: string; stderr: string }> {
+): Promise<{ response: string; stdout: string; stderr: string; timings: Record<string, number> }> {
+  // Phase timings are returned so a timeout can be attributed to a phase instead of
+  // being guessed at; the whole run is bounded by the readiness deadline below plus
+  // the shell round trip and the 2-second shutdown grace.
+  const timings: Record<string, number> = {};
+  let mark = Date.now();
+  const lap = (name: string) => { const now = Date.now(); timings[name] = now - mark; mark = now; };
   const { directory } = await createWorkspace(base, guardianUrl, modelUrl);
   const port = await reservePort();
+  lap("workspace_ms");
   const url = `http://127.0.0.1:${port}`;
   const child = spawn(openCodeCli, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: directory,
@@ -340,6 +347,7 @@ async function runDirectServerShell(
       if (Date.now() > deadline) throw new Error(`OpenCode server did not start\nstdout:\n${stdout}\nstderr:\n${stderr}`);
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
+    lap("serve_ready_ms");
     const sessionResponse = await fetch(`${url}/session`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -348,6 +356,7 @@ async function runDirectServerShell(
     if (!sessionResponse.ok) throw new Error(`session creation failed: ${sessionResponse.status} ${await sessionResponse.text()}`);
     const session = await sessionResponse.json() as JsonObject;
     if (typeof session.id !== "string") throw new Error(`session response has no id: ${JSON.stringify(session)}`);
+    lap("session_create_ms");
     const shellResponse = await fetch(`${url}/session/${session.id}/shell`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -358,8 +367,9 @@ async function runDirectServerShell(
       }),
     });
     const response = await shellResponse.text();
+    lap("shell_roundtrip_ms");
     if (!shellResponse.ok) throw new Error(`direct shell failed: ${shellResponse.status} ${response}`);
-    return { response, stdout, stderr };
+    return { response, stdout, stderr, timings };
   } finally {
     child.kill("SIGTERM");
     await new Promise<void>((resolveExit) => {
@@ -669,9 +679,17 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
       `printf direct > ${JSON.stringify(target)} # acs-deny`,
     );
     const toolRequests = guardian.requests.slice(offset).filter((request) => request.method === "steps/toolCallRequest");
+    console.log(`direct-shell phase timings: ${JSON.stringify(run.timings)}`);
     expect(await readFile(target, "utf8"), `server response: ${run.response}\nstderr: ${run.stderr}`).toBe("direct");
     expect(toolRequests).toHaveLength(0);
-  });
+    // Measured on 2026-11-09 against OpenCode 1.18.20: serve ready ~0.6 s, first request
+    // (session create, where the server lazily initializes) 3.7-5.4 s locally, shell round
+    // trip ~1.6 s, plus the 2 s shutdown grace in runDirectServerShell. A GitHub runner ran
+    // the other runtime cases ~40% slower than this machine. The default 15 s was below the
+    // case's own internal budgets (10 s readiness deadline + initialization + shutdown), so a
+    // timeout there masked the slow phase. The readiness deadline is unchanged; a genuine
+    // start failure still fails within 10 s.
+  }, 40_000);
 
   it("intercepts and denies a plugin-defined custom tool with complete arguments", async () => {
     const base = await temporary("opencode-acs-custom-deny-");
