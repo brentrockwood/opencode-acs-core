@@ -72,7 +72,9 @@ describe("decision failure audit", () => {
     const build = vi.spyOn(mapper, "buildRequest").mockImplementationOnce(() => { throw new Error("nonce generation failed"); });
     const acs = client();
     const state = newSessionState("host-session");
-    await expect(acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))).rejects.toThrow();
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await expect(acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))).rejects.toMatchObject({ kind: "invalid_schema" });
+    expect(JSON.parse(String(stderr.mock.calls.at(-1)?.[0]))).toMatchObject({ event: "acs_decision_failure", failure_kind: "invalid_schema", disposition: "integrity" });
     build.mockRestore();
     await expect(acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))).resolves.toMatchObject({ decision: "allow" });
     expect(state.decisionFailures).toEqual({ observed_agent_error: 1 });

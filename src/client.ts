@@ -151,9 +151,14 @@ export class AcsClient {
       const result = await this.performRequest(state, request, explicitTimeout);
       return method === "handshake/hello" ? this.validateHello(result) : result;
     } catch (error) {
+      // Normalize a local request fault once, so the client record and the host records
+      // for the same failure carry the same failure_kind.
+      const failure = !requestValid && !(error instanceof AcsClientError)
+        ? new AcsClientError("invalid_schema", String(error), error)
+        : error;
       const failureClass = method === "handshake/hello"
         ? "handshake_failure"
-        : requestValid ? decisionFailureClass(error) : "observed_agent_error";
+        : requestValid ? decisionFailureClass(failure) : "observed_agent_error";
       state.decisionFailures ??= {};
       state.decisionFailures[failureClass] = (state.decisionFailures[failureClass] ?? 0) + 1;
       await this.audit.write({
@@ -162,12 +167,11 @@ export class AcsClient {
         ...(request ? { request_id: request.params.request_id } : {}),
         method,
         failure_class: failureClass,
-        ...failureFields(error),
+        ...failureFields(failure),
         posture: method === "handshake/hello" ? this.config.startupPosture : this.failurePosture(state),
         message: `ACS exchange failed: ${failureClass}`,
       });
-      if (!requestValid && !(error instanceof AcsClientError)) throw new AcsClientError("invalid_schema", String(error), error);
-      throw error;
+      throw failure;
     } finally {
       release();
       if (this.requestQueues.get(state.sessionId) === current) this.requestQueues.delete(state.sessionId);

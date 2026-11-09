@@ -481,6 +481,46 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           await initialize(sessionID);
         }
       }
+      if (event.type === "message.part.updated") {
+        // OpenCode 1.18.20 calls tool.execute.after only when a tool returns. A tool that
+        // throws is reported as a tool part in state "error", so tracking opened at
+        // tool.execute.before must be released here or a later fresh task in the same
+        // parent would be denied as a concurrent launch.
+        const part = typeof properties.part === "object" && properties.part !== null && !Array.isArray(properties.part)
+          ? properties.part as JsonObject
+          : undefined;
+        const partState = typeof part?.state === "object" && part.state !== null && !Array.isArray(part.state)
+          ? part.state as JsonObject
+          : undefined;
+        if (
+          part?.type === "tool"
+          && partState?.status === "error"
+          && typeof part.sessionID === "string"
+          && typeof part.callID === "string"
+        ) {
+          const callKey = key(part.sessionID, part.callID);
+          toolRequests.delete(callKey);
+          uncorrelatedSubagentCalls.delete(callKey);
+          const subagent = subagentCalls.get(callKey);
+          if (subagent) {
+            subagentCalls.delete(callKey);
+            if (pendingSubagents.get(part.sessionID) === subagent) pendingSubagents.delete(part.sessionID);
+            const parent = sessions.get(part.sessionID);
+            await client.record({
+              event: "acs_subagent_launch_failed",
+              ...(parent ? { session_id: parent.sessionId } : {}),
+              host_session_id: part.sessionID,
+              call_id: part.callID,
+              subagent_session_id: subagent.state.sessionId,
+              ...(subagent.startRequestId ? { request_id: subagent.startRequestId } : {}),
+              ...(subagent.boundHostSessionID ? { child_host_session_id: subagent.boundHostSessionID } : {}),
+              message: subagent.boundHostSessionID
+                ? "task ended in error after its child session was bound; no subagentStop is claimed"
+                : "task ended in error before a child session was created",
+            });
+          }
+        }
+      }
       if (event.type === "session.deleted" && sessionID) {
         const state = sessions.get(sessionID);
         sessions.delete(sessionID);

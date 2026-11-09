@@ -500,6 +500,44 @@ describe("OpenCode plugin lifecycle", () => {
     ]));
   });
 
+  it("releases a task that ends in error without reaching tool.execute.after, so a later task can launch", async () => {
+    const guardian = createGuardian();
+    vi.stubGlobal("fetch", guardian.fetch);
+    const { auditPath, hooks } = await configuredPlugin("opencode-acs-failed-task-", "refuse");
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "ses_parent" } } } } as never);
+    await hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "ses_parent", callID: "call_failed" },
+      { args: { description: "child", prompt: "inspect", subagent_type: "does-not-exist" } },
+    );
+    // Host reports the failed launch as a tool part in state "error"; tool.execute.after never fires.
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "prt_1", sessionID: "ses_parent", messageID: "msg_1", type: "tool", callID: "call_failed", tool: "task",
+            state: { status: "error", error: 'Agent not found: "does-not-exist"', input: {} },
+          },
+        },
+      },
+    } as never);
+    // A later fresh task in the same parent must not be denied as a concurrent launch.
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "ses_parent", callID: "call_second" },
+      { args: { description: "child", prompt: "inspect", subagent_type: "general" } },
+    )).resolves.toBeUndefined();
+    await hooks.event!({
+      event: { type: "session.created", properties: { info: { id: "ses_child", parentID: "ses_parent", title: "child (@general subagent)" } } },
+    } as never);
+    const audit = await auditRecords(auditPath);
+    const failed = audit.filter((record) => record.event === "acs_subagent_launch_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ host_session_id: "ses_parent", call_id: "call_failed" });
+    expect(audit.filter((record) => record.event === "acs_subagent_session_bound")).toHaveLength(1);
+    expect(audit.some((record) => record.event === "acs_tool_blocked")).toBe(false);
+    expect(guardian.requests.filter((request) => request.method === "steps/subagentStart")).toHaveLength(2);
+  });
+
   it("clears an unmatched completed task so a later child can be correlated", async () => {
     const directory = await mkdtemp(join(tmpdir(), "opencode-acs-plugin-unmatched-subagent-"));
     temporaryDirectories.add(directory);

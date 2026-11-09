@@ -640,6 +640,24 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     expect(stop?.params.metadata.session_id).toBe(start.params.metadata.session_id);
   });
 
+  it("releases a task that fails before creating a child, using the host's error part", async () => {
+    const base = await temporary("opencode-acs-failed-task-");
+    const requestOffset = guardian.requests.length;
+    const run = await runOpenCode(
+      base,
+      guardianServer!.url,
+      modelServer!.url,
+      toolPrompt("task", { description: "doomed child", prompt: "inspect", subagent_type: "does-not-exist" }),
+    );
+    expect(guardian.requests.slice(requestOffset).filter((request) => request.method === "steps/subagentStart")).toHaveLength(1);
+    expect(guardian.requests.slice(requestOffset).some((request) => request.method === "steps/subagentStop")).toBe(false);
+    const failed = run.audit.filter((event) => event.event === "acs_subagent_launch_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ message: "[omitted]", tool: undefined });
+    expect(failed[0]?.child_host_session_id).toBeUndefined();
+    expect(run.audit.some((event) => event.event === "acs_subagent_session_bound")).toBe(false);
+  });
+
   it("records that the direct server shell bypasses the model-tool hook", async () => {
     const base = await temporary("opencode-acs-direct-shell-");
     const target = join(base, "direct-shell.txt");
