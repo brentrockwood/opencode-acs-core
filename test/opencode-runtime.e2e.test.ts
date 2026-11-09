@@ -176,6 +176,7 @@ async function createWorkspace(
   mcpTool = false,
   protectedResourceUrl?: string,
   hmacKeyId = TEST_KEY_ID,
+  startupPosture: "proceed" | "refuse" = "refuse",
 ): Promise<{ directory: string; auditPath: string }> {
   const directory = join(base, "workspace");
   const pluginDirectory = join(directory, ".opencode", "plugins");
@@ -221,7 +222,7 @@ export const CustomProbe = async () => ({
   await writeFile(join(directory, "opencode.json"), JSON.stringify(openCodeConfig));
   await writeFile(join(base, "acs.json"), JSON.stringify({
     mode: "enforce",
-    startupPosture: "refuse",
+    startupPosture,
     enableModify,
     guardian: {
       url: `${guardianUrl}/`,
@@ -246,6 +247,7 @@ async function runOpenCode(
   protectedResourceUrl?: string,
   hmacKey = TEST_KEY,
   hmacKeyId = TEST_KEY_ID,
+  startupPosture: "proceed" | "refuse" = "refuse",
 ): Promise<OpenCodeRun> {
   const { directory, auditPath } = await createWorkspace(
     base,
@@ -256,6 +258,7 @@ async function runOpenCode(
     mcpTool,
     protectedResourceUrl,
     hmacKeyId,
+    startupPosture,
   );
   const child = spawn(openCodeCli, [
     "run",
@@ -376,7 +379,11 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
   let guardianServer: ListeningServer | undefined;
   let modelServer: ListeningServer | undefined;
   const directories = new Set<string>();
+  let refuseHandshake = false;
   const guardian = createGuardian((request) => {
+    if (request.method === "handshake/hello" && refuseHandshake) {
+      return { error: { code: -32000, message: "session refused by deterministic Guardian" } };
+    }
     if (request.method !== "steps/toolCallRequest" && request.method !== "steps/subagentStart") return {};
     const command = argument(request, "command");
     const payloadText = JSON.stringify(request.params.payload);
@@ -725,6 +732,36 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     );
     await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
     expect(run.audit.some((event) => event.event === "acs_startup_refused")).toBe(true);
+  });
+
+  it("refuses tool execution on a signed handshake refusal even with startup proceed", async () => {
+    const base = await temporary("opencode-acs-refused-");
+    const target = join(base, "refused.txt");
+    const requestOffset = guardian.requests.length;
+    refuseHandshake = true;
+    let run: OpenCodeRun;
+    try {
+      run = await runOpenCode(
+        base,
+        guardianServer!.url,
+        modelServer!.url,
+        `printf refused > ${JSON.stringify(target)}`,
+        false,
+        false,
+        false,
+        undefined,
+        TEST_KEY,
+        TEST_KEY_ID,
+        "proceed",
+      );
+    } finally {
+      refuseHandshake = false;
+    }
+    await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(guardian.requests.slice(requestOffset).map((request) => request.method)).toEqual(["handshake/hello"]);
+    expect(run.stdout).toContain("refused the session");
+    expect(run.audit.some((event) => event.event === "acs_startup_refused" && event.disposition === "refusal" && event.error_code === -32000)).toBe(true);
+    expect(run.audit.some((event) => event.event === "acs_session_unguarded")).toBe(false);
   });
 
   const remoteBaseUrl = process.env.ACS_REMOTE_TEST_URL;

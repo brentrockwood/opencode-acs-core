@@ -4,9 +4,10 @@ import { randomUUID } from "node:crypto";
 import { AcsClient } from "./client.js";
 import { loadConfig } from "./config.js";
 import { applyTopLevelOverrides, resolveDecision, type GateOutcome } from "./enforcer.js";
+import { failureDisposition, failureFields } from "./failure.js";
 import { newSessionState, subagentStartPayload, subagentStopPayload, toolCallPayload, toolResultPayload } from "./mapper.js";
 import { appendProtectedValue, PROTECTED_TOOL } from "./protected.js";
-import { AcsClientError, type JsonObject, type SessionState } from "./types.js";
+import type { JsonObject, SessionState } from "./types.js";
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -62,6 +63,14 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
     return true;
   }
 
+  // Only an availability failure (no usable answer) follows the configured posture.
+  // A refusal or an integrity failure blocks the step under either posture.
+  function failureBlocks(state: SessionState, error: unknown): boolean {
+    if (config.mode !== "enforce") return false;
+    if (failureDisposition(error) !== "availability") return true;
+    return state.handshake ? client.failurePosture(state) === "deny" : config.startupPosture === "refuse";
+  }
+
   async function initialize(sessionID: string, preparedState?: SessionState): Promise<SessionState> {
     const pending = starts.get(sessionID);
     if (pending) return pending;
@@ -78,6 +87,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           const result = await client.request(state, "steps/sessionStart", {});
           if (result.decision !== "allow") {
             state.refuseActions = config.mode === "enforce";
+            state.refusalReason = `ACS session start ${result.decision === "deny" ? "denied" : `returned unsupported ${result.decision.toUpperCase()}`}`;
             await client.record({
               event: "acs_session_start_rejected",
               session_id: state.sessionId,
@@ -87,13 +97,24 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           }
         }
       } catch (error) {
+        // §4.1: a Guardian that answered with a refusal has decided; the startup posture
+        // applies only when no answer arrived. An answer that fails verification is not
+        // an answer this adapter can act on, so it refuses as well.
+        const disposition = failureDisposition(error);
         state.guarded = false;
-        state.refuseActions = config.mode === "enforce" && config.startupPosture === "refuse";
+        state.refuseActions = failureBlocks(state, error);
+        if (state.refuseActions) {
+          state.refusalReason = disposition === "refusal"
+            ? "ACS Guardian refused the session"
+            : disposition === "integrity"
+              ? "ACS Guardian handshake failed verification or local acceptance checks"
+              : "ACS session is not guarded and startup posture is refuse";
+        }
         await client.record({
           event: state.refuseActions ? "acs_startup_refused" : "acs_session_unguarded",
           session_id: state.sessionId,
           host_session_id: sessionID,
-          failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+          ...failureFields(error),
           message: message(error),
         });
         await log(state.refuseActions ? "error" : "warn", `Guardian handshake failed: ${message(error)}`);
@@ -115,7 +136,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
   ): Promise<GateOutcome> {
     const parent = await initialize(sessionID);
     if (parent.refuseActions && config.mode === "enforce") {
-      return { action: "deny", reason: "ACS session is not guarded and startup posture is refuse" };
+      return { action: "deny", reason: parent.refusalReason ?? "ACS session is refused" };
     }
     if (pendingSubagents.has(sessionID)) {
       if (config.mode === "observe") {
@@ -189,9 +210,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         requestId: result.request_id,
       };
     } catch (error) {
-      const blocks = config.mode === "enforce"
-        && (parent.handshake ? client.failurePosture(parent) === "deny" : config.startupPosture === "refuse");
-      if (blocks) {
+      if (failureBlocks(parent, error)) {
         pendingSubagents.delete(sessionID);
         subagentCalls.delete(key(sessionID, callID));
         return { action: "deny", reason: `ACS decision failure: ${message(error)}`, ...(startRequestId ? { requestId: startRequestId } : {}) };
@@ -203,7 +222,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
         call_id: callID,
         ...(startRequestId ? { request_id: startRequestId } : {}),
         method: "steps/subagentStart",
-        failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+        ...failureFields(error),
         message: message(error),
       });
       return { action: "allow", ...(startRequestId ? { requestId: startRequestId } : {}) };
@@ -218,7 +237,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
   ): Promise<GateOutcome> {
     const state = await initialize(sessionID);
     if (state.refuseActions && config.mode === "enforce") {
-      return { action: "deny", reason: "ACS session is not guarded and startup posture is refuse" };
+      return { action: "deny", reason: state.refusalReason ?? "ACS session is refused" };
     }
     try {
       if (await skipUnevaluated(state, "steps/toolCallRequest", {
@@ -253,15 +272,14 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
       }
       return outcome;
     } catch (error) {
-      const blocks = config.mode === "enforce" && (state.handshake ? client.failurePosture(state) === "deny" : config.startupPosture === "refuse");
-      if (blocks) return { action: "deny", reason: `ACS decision failure: ${message(error)}` };
+      if (failureBlocks(state, error)) return { action: "deny", reason: `ACS decision failure: ${message(error)}` };
       await client.record({
         event: "acs_fail_open",
         session_id: state.sessionId,
         host_session_id: sessionID,
         call_id: callID,
         method: "steps/toolCallRequest",
-        failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+        ...failureFields(error),
         message: message(error),
       });
       return { action: "allow" };
@@ -377,7 +395,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
                   host_session_id: input.sessionID,
                   call_id: input.callID,
                   subagent_session_id: subagent.state.sessionId,
-                  failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+                  ...failureFields(error),
                   message: message(error),
                 });
               });
@@ -430,7 +448,7 @@ export const AcsPlugin: Plugin = async ({ directory, client: openCodeClient }) =
           call_id: input.callID,
           ...(tracked?.requestId ? { request_id: tracked.requestId } : {}),
           tool: input.tool,
-          failure_kind: error instanceof AcsClientError ? error.kind : "transport",
+          ...failureFields(error),
           message: message(error),
         });
       }

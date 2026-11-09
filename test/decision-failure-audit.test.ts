@@ -125,6 +125,8 @@ describe("decision failure audit", () => {
     const records = stderr.mock.calls.map(([line]) => JSON.parse(String(line)));
     expect(records).toHaveLength(6);
     expect(records.every((record) => record.event === "acs_decision_failure" && record.posture === posture && record.request_id)).toBe(true);
+    expect(records.map((record) => record.disposition)).toEqual(["integrity", "integrity", "integrity", "integrity", "refusal", "availability"]);
+    expect(records[4]).toMatchObject({ error_code: -32020 });
     expect(acs.failurePosture(state)).toBe(posture);
     failure = "allow";
     await acs.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }));

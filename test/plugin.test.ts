@@ -15,6 +15,160 @@ afterEach(async () => {
   temporaryDirectories.clear();
 });
 
+async function configuredPlugin(
+  prefix: string,
+  startupPosture: "proceed" | "refuse",
+  mode: "observe" | "enforce" = "enforce",
+): Promise<{ directory: string; auditPath: string; hooks: Awaited<ReturnType<typeof AcsPlugin>> }> {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  temporaryDirectories.add(directory);
+  const configPath = join(directory, "acs.json");
+  const auditPath = join(directory, "audit.jsonl");
+  await writeFile(configPath, JSON.stringify({
+    mode,
+    startupPosture,
+    guardian: { url: "http://127.0.0.1:8787/", hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY", keyId: "test-key" },
+    audit: { path: auditPath },
+  }));
+  process.env.OPENCODE_ACS_CONFIG = configPath;
+  process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
+  const hooks = await AcsPlugin({ directory, client: { app: { log: vi.fn(async () => undefined) } } } as never);
+  return { directory, auditPath, hooks };
+}
+
+async function auditRecords(auditPath: string): Promise<Array<Record<string, unknown>>> {
+  return (await readFile(auditPath, "utf8")).trim().split("\n").filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+describe("refusal, outage and integrity separation", () => {
+  it.each([
+    { name: "a signed SESSION_REFUSED error", reply: { error: { code: -32000, message: "session refused by policy" } }, disposition: "refusal", code: -32000 },
+    { name: "a signed UNSUPPORTED_VERSION error", reply: { error: { code: -32001, message: "no common version" } }, disposition: "refusal", code: -32001 },
+    { name: "an HTTP 401 without a body", reply: { status: 401, raw: "" }, disposition: "refusal" },
+    { name: "an unverifiable ServerHello", reply: { unsignedHello: true }, disposition: "integrity" },
+    { name: "malformed handshake JSON", reply: { raw: "{broken" }, disposition: "integrity" },
+  ])("refuses the whole session on $name even when startup posture is proceed", async ({ reply, disposition, code }) => {
+    const guardian = createGuardian((request) => request.method === "handshake/hello" ? reply : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const { auditPath, hooks } = await configuredPlugin("opencode-acs-refused-", "proceed");
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "ses_refused" } } } } as never);
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_refused", callID: "one" }, { args: { command: "anything" } },
+    )).rejects.toThrow(/refused the session|failed verification/);
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "ses_refused", callID: "two" }, { args: { description: "child", prompt: "x", subagent_type: "general" } },
+    )).rejects.toThrow(/refused the session|failed verification/);
+    expect(guardian.requests.filter((request) => request.method !== "handshake/hello")).toHaveLength(0);
+    const audit = await auditRecords(auditPath);
+    const refused = audit.filter((record) => record.event === "acs_startup_refused");
+    expect(refused).toHaveLength(1);
+    expect(refused[0]).toMatchObject({ disposition, ...(code ? { error_code: code } : {}) });
+    expect(audit.some((record) => record.event === "acs_session_unguarded")).toBe(false);
+    expect(audit.filter((record) => record.event === "acs_tool_blocked")).toHaveLength(2);
+  });
+
+  it.each([
+    { name: "a refused connection", reply: undefined, failureKind: "transport" },
+    { name: "an HTTP 503 without a body", reply: { status: 503, raw: "unavailable" }, failureKind: "http" },
+    { name: "a signed internal error", reply: { error: { code: -32603, message: "internal" } }, failureKind: "guardian_error" },
+  ])("starts unguarded on $name only because startup posture is proceed", async ({ reply, failureKind }) => {
+    const guardian = createGuardian((request) => request.method === "handshake/hello" && reply ? reply : {});
+    vi.stubGlobal("fetch", reply ? guardian.fetch : async () => { throw new TypeError("connect ECONNREFUSED"); });
+    const { auditPath, hooks } = await configuredPlugin("opencode-acs-unguarded-", "proceed");
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_unguarded", callID: "one" }, { args: { command: "anything" } },
+    )).resolves.toBeUndefined();
+    const audit = await auditRecords(auditPath);
+    expect(audit.filter((record) => record.event === "acs_session_unguarded")).toEqual([
+      expect.objectContaining({ disposition: "availability", failure_kind: failureKind }),
+    ]);
+    expect(audit.some((record) => record.event === "acs_startup_refused")).toBe(false);
+  });
+
+  it("still follows refuse for an outage at startup", async () => {
+    vi.stubGlobal("fetch", async () => { throw new TypeError("connect ECONNREFUSED"); });
+    const { hooks } = await configuredPlugin("opencode-acs-refuse-outage-", "refuse");
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_outage", callID: "one" }, { args: { command: "anything" } },
+    )).rejects.toThrow("startup posture is refuse");
+  });
+
+  it("blocks refusals and integrity failures under a negotiated proceed posture, and fails open only on outages", async () => {
+    let failure = "none";
+    const guardian = createGuardian((request) => {
+      if (request.method === "handshake/hello") return { onDecisionFailure: "proceed" };
+      if (request.method !== "steps/toolCallRequest" && request.method !== "steps/subagentStart") return {};
+      switch (failure) {
+        case "refused": return { error: { code: -32000, message: "refused" } };
+        case "refused-on-403": return { status: 403, error: { code: -32000, message: "refused" } };
+        case "http-403": return { status: 403, raw: "" };
+        case "malformed": return { raw: "{" };
+        case "internal": return { error: { code: -32603, message: "internal" } };
+        case "http-503": return { status: 503, raw: "unavailable" };
+        case "timeout": return { delayMs: 1_200 };
+        default: return {};
+      }
+    });
+    const signedFetch = guardian.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (failure === "offline") throw new TypeError("offline");
+      const response = await signedFetch(input, init);
+      const request = JSON.parse(String(init?.body)) as { method?: string };
+      if (request.method !== "steps/toolCallRequest") return response;
+      if (!["signature", "key", "id", "request_id", "allow-shape"].includes(failure)) return response;
+      const value = await response.json();
+      if (failure === "signature") value.result.signature.value = "AAAA";
+      if (failure === "key") value.result.signature.key_id = "other-key";
+      if (failure === "id") value.id = "wrong-id";
+      if (failure === "request_id") value.result.request_id = "00000000-0000-4000-8000-000000000000";
+      if (failure === "allow-shape") value.result.decision = "allowed";
+      return Response.json(value);
+    });
+    const { auditPath, hooks } = await configuredPlugin("opencode-acs-matrix-", "proceed");
+    await hooks.event!({ event: { type: "session.created", properties: { info: { id: "ses_matrix" } } } } as never);
+
+    const blocking = ["refused", "refused-on-403", "http-403", "malformed", "signature", "key", "id", "request_id", "allow-shape"];
+    const open = ["internal", "http-503", "timeout", "offline"];
+    for (const kind of [...blocking, ...open]) {
+      failure = kind;
+      const action = hooks["tool.execute.before"]!({ tool: "bash", sessionID: "ses_matrix", callID: kind }, { args: { command: kind } });
+      if (blocking.includes(kind)) await expect(action, kind).rejects.toThrow("ACS decision failure");
+      else await expect(action, kind).resolves.toBeUndefined();
+    }
+    failure = "refused";
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "task", sessionID: "ses_matrix", callID: "task" }, { args: { description: "child", prompt: "x", subagent_type: "general" } },
+    )).rejects.toThrow("ACS decision failure");
+    failure = "none";
+    await hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "ses_matrix" } } } } as never);
+
+    const audit = await auditRecords(auditPath);
+    const failures = audit.filter((record) => record.event === "acs_decision_failure");
+    expect(failures).toHaveLength(blocking.length + open.length + 1);
+    expect(failures.every((record) => record.posture === "proceed" && typeof record.disposition === "string")).toBe(true);
+    expect(failures.filter((record) => record.disposition === "availability")).toHaveLength(open.length);
+    expect(audit.filter((record) => record.event === "acs_fail_open")).toHaveLength(open.length);
+    expect(audit.filter((record) => record.event === "acs_tool_blocked")).toHaveLength(blocking.length + 1);
+    const summary = guardian.requests.at(-1)?.params.payload.summary as { decision_failures: Record<string, number> };
+    expect(Object.values(summary.decision_failures).reduce((total, count) => total + count, 0)).toBe(blocking.length + open.length + 1);
+  }, 15_000);
+
+  it("never blocks on a refusal in observe mode", async () => {
+    const guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { error: { code: -32000, message: "session refused by policy" } }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const { auditPath, hooks } = await configuredPlugin("opencode-acs-observe-refused-", "proceed", "observe");
+    await expect(hooks["tool.execute.before"]!(
+      { tool: "bash", sessionID: "ses_observe", callID: "one" }, { args: { command: "anything" } },
+    )).resolves.toBeUndefined();
+    const audit = await auditRecords(auditPath);
+    expect(audit.filter((record) => record.event === "acs_session_unguarded")).toEqual([
+      expect.objectContaining({ disposition: "refusal", error_code: -32000 }),
+    ]);
+  });
+});
+
 describe("OpenCode plugin lifecycle", () => {
   it.each([
     { posture: "deny" as const, fails: false, blocked: false },
@@ -34,7 +188,7 @@ describe("OpenCode plugin lifecycle", () => {
     process.env.OPENCODE_ACS_PLUGIN_TEST_KEY = TEST_KEY;
     const guardian = createGuardian((request) => request.method === "handshake/hello"
       ? { onDecisionFailure: posture }
-      : fails && request.method === "steps/toolCallRequest" ? { raw: "{" } : {});
+      : fails && request.method === "steps/toolCallRequest" ? { error: { code: -32603, message: "internal" } } : {});
     vi.stubGlobal("fetch", guardian.fetch);
     const hooks = await AcsPlugin({ directory, client: { app: { log: vi.fn(async () => undefined) } } } as never);
     const action = hooks["tool.execute.before"]!(
@@ -45,7 +199,7 @@ describe("OpenCode plugin lifecycle", () => {
     const failures = stderr.mock.calls.map(([line]) => JSON.parse(String(line))).filter((record) => record.event === "acs_decision_failure");
     expect(failures).toHaveLength(fails ? 1 : 0);
     await hooks.event!({ event: { type: "session.deleted", properties: { info: { id: "ses_audit" } } } } as never);
-    expect(guardian.requests.at(-1)?.params.payload.summary).toEqual({ decision_failures: fails ? { malformed_response: 1 } : {} });
+    expect(guardian.requests.at(-1)?.params.payload.summary).toEqual({ decision_failures: fails ? { guardian_error: 1 } : {} });
     stderr.mockRestore();
   });
 

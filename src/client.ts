@@ -1,6 +1,7 @@
 import type { AcsConfig } from "./config.js";
 import { AuditSink, decisionFailureClass } from "./audit.js";
 import { deriveSessionKey, signEnvelope, verifyEnvelope } from "./crypto.js";
+import { failureFields } from "./failure.js";
 import { METHODS_IMPLEMENTED, buildRequest, clientHello } from "./mapper.js";
 import { validateRequest, validateResponse, validateServerHello } from "./schema.js";
 import {
@@ -8,6 +9,7 @@ import {
   AcsClientError,
   type AcsRequestEnvelope,
   type AcsResponseEnvelope,
+  type AcsClientErrorDetail,
   type AcsResult,
   type JsonObject,
   type ServerHello,
@@ -18,6 +20,23 @@ function isServerHello(result: AcsResult | ServerHello): result is ServerHello {
   return !("decision" in result)
     && typeof result.negotiated_version === "string"
     && Array.isArray(result.methods_evaluated);
+}
+
+/**
+ * A Guardian may carry a JSON-RPC envelope on a non-2xx status. Only a body that is
+ * recognizably JSON-RPC is passed on for schema, correlation and signature checks;
+ * anything else leaves the HTTP status as the recorded cause.
+ */
+function jsonRpcEnvelope(text: string): AcsResponseEnvelope | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (typeof value === "object" && value !== null && !Array.isArray(value) && (value as { jsonrpc?: unknown }).jsonrpc === "2.0") {
+      return value as AcsResponseEnvelope;
+    }
+  } catch {
+    // Not JSON at all; the HTTP status is the cause.
+  }
+  return undefined;
 }
 
 export class AcsClient {
@@ -143,7 +162,7 @@ export class AcsClient {
         ...(request ? { request_id: request.params.request_id } : {}),
         method,
         failure_class: failureClass,
-        failure_kind: error instanceof AcsClientError ? error.kind : "other",
+        ...failureFields(error),
         posture: method === "handshake/hello" ? this.config.startupPosture : this.failurePosture(state),
         message: `ACS exchange failed: ${failureClass}`,
       });
@@ -179,14 +198,17 @@ export class AcsClient {
       signed: Boolean(request.params.signature),
     });
 
-    const response = await this.fetchResponse(request, timeout);
+    const { envelope: response, status } = await this.fetchResponse(request, timeout);
+    // Carried on every failure derived from this response so the audit record keeps the
+    // HTTP status when an envelope rode a non-2xx answer.
+    const detail: AcsClientErrorDetail = status === undefined ? {} : { status };
 
     try {
       validateResponse(response);
     } catch (error) {
-      throw new AcsClientError("invalid_schema", (error as Error).message, error);
+      throw new AcsClientError("invalid_schema", (error as Error).message, error, detail);
     }
-    if (response.id !== request.id) throw new AcsClientError("correlation", "JSON-RPC response id does not match request");
+    if (response.id !== request.id) throw new AcsClientError("correlation", "JSON-RPC response id does not match request", undefined, detail);
     if (response.error) {
       if (
         sessionKey && method !== "system/ping" && (
@@ -195,9 +217,13 @@ export class AcsClient {
           || !verifyEnvelope(response, sessionKey, response.error.signature)
         )
       ) {
-        throw new AcsClientError("signature", "Guardian error response signature is missing or invalid");
+        throw new AcsClientError("signature", "Guardian error response signature is missing or invalid", undefined, detail);
       }
-      throw new AcsClientError("guardian_error", response.error.message, response.error);
+      throw new AcsClientError("guardian_error", response.error.message, response.error, { ...detail, code: response.error.code });
+    }
+    if (status !== undefined) {
+      // A success body on a failure status is contradictory; neither half can be trusted.
+      throw new AcsClientError("invalid_schema", `Guardian returned a result on HTTP ${status}`, undefined, detail);
     }
     if (!response.result) throw new AcsClientError("invalid_schema", "response has neither result nor error");
     if (isServerHello(response.result)) {
@@ -262,7 +288,10 @@ export class AcsClient {
     await this.audit.write(event);
   }
 
-  private async fetchResponse(request: AcsRequestEnvelope, timeoutMs: number): Promise<AcsResponseEnvelope> {
+  private async fetchResponse(
+    request: AcsRequestEnvelope,
+    timeoutMs: number,
+  ): Promise<{ envelope: AcsResponseEnvelope; status?: number }> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -273,14 +302,28 @@ export class AcsClient {
         redirect: "error",
         signal: controller.signal,
       });
-      if (!response.ok) throw new AcsClientError("http", `Guardian returned HTTP ${response.status}`);
+      const status = response.status;
       const declaredLength = Number(response.headers.get("content-length"));
       if (Number.isFinite(declaredLength) && declaredLength > this.config.guardian.maxResponseBytes) {
-        throw new AcsClientError("response_too_large", "Guardian response exceeds configured limit");
+        throw new AcsClientError("response_too_large", "Guardian response exceeds configured limit", undefined, response.ok ? {} : { status });
       }
-      const text = await this.readBoundedBody(response, this.config.guardian.maxResponseBytes);
+      let text: string;
       try {
-        return JSON.parse(text) as AcsResponseEnvelope;
+        text = await this.readBoundedBody(response, this.config.guardian.maxResponseBytes);
+      } catch (error) {
+        // Keep the oversize cause; an abort mid-body falls through to the timeout check below.
+        if (error instanceof AcsClientError && !response.ok) throw new AcsClientError(error.kind, error.message, error.causeValue, { status });
+        throw error;
+      }
+      if (!response.ok) {
+        // §17.1 refusals and signed errors can ride on a 4xx/5xx. Read the body before
+        // classifying by status so an authenticated refusal is not discarded.
+        const envelope = jsonRpcEnvelope(text);
+        if (envelope) return { envelope, status };
+        throw new AcsClientError("http", `Guardian returned HTTP ${status}`, undefined, { status });
+      }
+      try {
+        return { envelope: JSON.parse(text) as AcsResponseEnvelope };
       } catch (error) {
         throw new AcsClientError("invalid_json", "Guardian returned invalid JSON", error);
       }

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcsClient } from "../src/client.js";
 import type { AcsConfig } from "../src/config.js";
+import { failureDisposition } from "../src/failure.js";
 import { newSessionState, toolCallPayload } from "../src/mapper.js";
 import { AcsClientError, type ServerHello } from "../src/types.js";
 import { createGuardian, TEST_KEY, TEST_KEY_ID } from "./guardian-helper.js";
@@ -195,6 +196,120 @@ describe("Guardian client", () => {
     const calls = guardian.requests.filter((request) => request.method === "steps/toolCallRequest");
     expect(calls[0]?.params.metadata.session_state).toBeUndefined();
     expect(calls[1]?.params.metadata.session_state?.chain_hash).toBe("1".padStart(64, "0"));
+  });
+
+  it("keeps the JSON-RPC error code so a refusal is distinguishable from an internal error", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    let guardian = createGuardian((request) => request.method === "handshake/hello"
+      ? { error: { code: -32000, message: "agent not permitted", data: { reason: "agent_id" } } }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const refused = await new AcsClient(config()).handshake(newSessionState("ses_refused")).catch((error: unknown) => error);
+    expect(refused).toMatchObject({ kind: "guardian_error", code: -32000 });
+    expect(failureDisposition(refused)).toBe("refusal");
+
+    guardian = createGuardian((request) => request.method === "steps/toolCallRequest"
+      ? { error: { code: -32603, message: "internal" } }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const client = new AcsClient(config());
+    const state = newSessionState("ses_internal");
+    state.handshake = await client.handshake(state);
+    const internal = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))
+      .catch((error: unknown) => error);
+    expect(internal).toMatchObject({ kind: "guardian_error", code: -32603 });
+    expect(failureDisposition(internal)).toBe("availability");
+  });
+
+  it("reads a signed JSON-RPC error carried on a non-2xx response instead of discarding it", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest"
+      ? { status: 403, error: { code: -32000, message: "refused on 403" } }
+      : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const client = new AcsClient(config());
+    const state = newSessionState("ses_403");
+    state.handshake = await client.handshake(state);
+    await expect(client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" })))
+      .rejects.toMatchObject({ kind: "guardian_error", code: -32000, status: 403, message: "refused on 403" });
+
+    const signedFetch = guardian.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await signedFetch(input, init);
+      const value = await response.json() as { error?: { signature?: unknown } };
+      if (value.error) delete value.error.signature;
+      return Response.json(value, { status: response.status });
+    });
+    await expect(client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" })))
+      .rejects.toMatchObject({ kind: "signature", status: 403 });
+  });
+
+  it("rejects a success body on a failure status and keeps the oversize cause on a 5xx", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest" ? { status: 502 } : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const client = new AcsClient(config());
+    const state = newSessionState("ses_contradictory");
+    state.handshake = await client.handshake(state);
+    const contradictory = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))
+      .catch((caught: unknown) => caught);
+    expect(contradictory).toMatchObject({ kind: "invalid_schema", status: 502 });
+    expect(failureDisposition(contradictory)).toBe("integrity");
+
+    vi.stubGlobal("fetch", async () => new Response("x".repeat(1_048_577), { status: 503 }));
+    const oversized = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))
+      .catch((caught: unknown) => caught);
+    expect(oversized).toMatchObject({ kind: "response_too_large", status: 503 });
+    expect(failureDisposition(oversized)).toBe("integrity");
+  });
+
+  it.each([
+    { status: 401, body: "", disposition: "refusal" },
+    { status: 403, body: "<html>forbidden</html>", disposition: "refusal" },
+    { status: 404, body: '{"error":"not found"}', disposition: "refusal" },
+    { status: 429, body: "", disposition: "refusal" },
+    { status: 408, body: "", disposition: "availability" },
+    { status: 503, body: "unavailable", disposition: "availability" },
+  ])("classifies HTTP $status without a JSON-RPC body as $disposition", async ({ status, body, disposition }) => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian((request) => request.method === "steps/toolCallRequest" ? { status, raw: body } : {});
+    vi.stubGlobal("fetch", guardian.fetch);
+    const client = new AcsClient(config());
+    const state = newSessionState("ses_http");
+    state.handshake = await client.handshake(state);
+    const error = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ kind: "http", status });
+    expect(failureDisposition(error)).toBe(disposition);
+  });
+
+  it("treats every verification failure as an integrity failure", async () => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian();
+    const signedFetch = guardian.fetch;
+    let tamper: "signature" | "key" | "id" | "schema" | "none" = "none";
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await signedFetch(input, init);
+      const request = JSON.parse(String(init?.body)) as { method?: string };
+      if (request.method !== "steps/toolCallRequest" || tamper === "none") return response;
+      const value = await response.json();
+      if (tamper === "signature") value.result.signature.value = "AAAA";
+      if (tamper === "key") value.result.signature.key_id = "other-key";
+      if (tamper === "id") value.id = "wrong-id";
+      if (tamper === "schema") value.result.decision = "allow-ish";
+      return Response.json(value);
+    });
+    const client = new AcsClient(config());
+    const state = newSessionState("ses_integrity");
+    state.handshake = await client.handshake(state);
+    for (const [kind, expected] of [["signature", "signature"], ["key", "signature"], ["id", "correlation"], ["schema", "invalid_schema"]] as const) {
+      tamper = kind;
+      const error = await client.request(state, "steps/toolCallRequest", toolCallPayload("bash", { command: "pwd" }))
+        .catch((caught: unknown) => caught);
+      expect(error).toMatchObject({ kind: expected });
+      expect(failureDisposition(error)).toBe("integrity");
+    }
+    expect(failureDisposition(new TypeError("not an AcsClientError"))).toBe("integrity");
   });
 
   it("rejects payloads larger than the advertised client limit before transport", async () => {

@@ -25,6 +25,7 @@ function canonicalEnvelope(envelope) {
   const value = structuredClone(envelope);
   if (value.params) delete value.params.signature;
   if (value.result) delete value.result.signature;
+  if (value.error) delete value.error.signature;
   return canonicalize(value);
 }
 
@@ -64,6 +65,15 @@ const server = createServer(async (incoming, outgoing) => {
       outgoing.writeHead(401).end();
       return;
     }
+    if (request.method === "steps/toolCallRequest" && String(request.params.payload.raw_command ?? "").includes("ACS_DEMO_REFUSE")) {
+      // A signed JSON-RPC error other than -32603 is a refusal: the adapter blocks the
+      // step under either failure posture instead of treating it as an outage.
+      const error = { code: -32000, message: "refused by the demo Guardian marker" };
+      const refusal = { jsonrpc: "2.0", id: request.id, error };
+      error.signature = { algorithm: "HMAC-SHA256", value: signature(refusal, key).toString("base64"), key_id: keyId };
+      outgoing.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(refusal));
+      return;
+    }
     const result = request.method === "handshake/hello"
       ? {
           negotiated_version: "0.1.0",
@@ -97,5 +107,5 @@ const server = createServer(async (incoming, outgoing) => {
 
 server.listen(port, "127.0.0.1", () => {
   process.stdout.write(`Demo Guardian listening on http://127.0.0.1:${port}/\n`);
-  process.stdout.write("Commands containing ACS_DEMO_DENY are denied. This is a fixture, not a policy service.\n");
+  process.stdout.write("Commands containing ACS_DEMO_DENY are denied; ACS_DEMO_REFUSE returns a signed refusal. This is a fixture, not a policy service.\n");
 });

@@ -98,6 +98,8 @@ export interface SessionState {
   decisionFailures?: Partial<Record<DecisionFailureClass, number>>;
   guarded: boolean;
   refuseActions: boolean;
+  /** Why mediated actions are refused for the rest of the session, when they are. */
+  refusalReason?: string;
 }
 
 export type DecisionFailureClass =
@@ -119,13 +121,26 @@ export type AcsFailureKind =
   | "unsupported_decision"
   | "invalid_modification";
 
+export interface AcsClientErrorDetail {
+  /** JSON-RPC error code when the Guardian answered with an error envelope. */
+  code?: number;
+  /** HTTP status when the transport answered without a usable JSON-RPC body. */
+  status?: number;
+}
+
 export class AcsClientError extends Error {
+  readonly code: number | undefined;
+  readonly status: number | undefined;
+
   constructor(
     public readonly kind: AcsFailureKind,
     message: string,
     public readonly causeValue?: unknown,
+    detail: AcsClientErrorDetail = {},
   ) {
     super(message);
     this.name = "AcsClientError";
+    this.code = detail.code;
+    this.status = detail.status;
   }
 }

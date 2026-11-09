@@ -13,7 +13,7 @@ It is not a sandbox. An operator who controls OpenCode can remove the plugin, us
 - Plugin-defined custom tools and an inert local MCP tool reach the same hook with complete fixture arguments and can be denied before their side effects.
 - Allowed results reach `steps/toolCallResult` and retain their request correlation.
 - Parallel sibling calls retain distinct request/result correlations.
-- Malformed output, an unavailable Guardian under refuse posture, and unsupported `ASK`/`DEFER` decisions fail closed.
+- Malformed output, signed Guardian refusals, verification failures, an unavailable Guardian under refuse posture, and unsupported `ASK`/`DEFER` decisions fail closed. Only a Guardian that gives no usable answer follows a `proceed` posture.
 - A Guardian-modified Bash command reaches execution when `enableModify` is true; no other modification shape or tool family is supported.
 - `POST /session/:id/shell` executes without a `steps/toolCallRequest`. It is an explicit bypass.
 - The first-party `acs_protected_append` tool obtains a signed, value-bound, 30-second capability from the Guardian and uses it at a private remote resource. The capability stays in plugin memory rather than model-visible arguments.
