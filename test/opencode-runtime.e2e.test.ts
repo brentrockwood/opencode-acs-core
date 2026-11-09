@@ -653,7 +653,7 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     expect(guardian.requests.slice(requestOffset).some((request) => request.method === "steps/subagentStop")).toBe(false);
     const failed = run.audit.filter((event) => event.event === "acs_subagent_launch_failed");
     expect(failed).toHaveLength(1);
-    expect(failed[0]).toMatchObject({ message: "[omitted]", tool: undefined });
+    expect(failed[0]).toMatchObject({ host_session_id: expect.any(String), call_id: expect.any(String), message: "[omitted]" });
     expect(failed[0]?.child_host_session_id).toBeUndefined();
     expect(run.audit.some((event) => event.event === "acs_subagent_session_bound")).toBe(false);
   });
