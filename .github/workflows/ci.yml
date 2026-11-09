@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # The runtime suite drives a real OpenCode binary and refuses any version other
+  # than the one pinned in src/types.ts. Keep this in step with OPENCODE_VERSION.
+  OPENCODE_PINNED_VERSION: 1.18.20
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install the pinned OpenCode binary outside the package
+        run: |
+          mkdir -p "$RUNNER_TEMP/opencode-pinned"
+          cd "$RUNNER_TEMP/opencode-pinned"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "opencode-ai@$OPENCODE_PINNED_VERSION"
+          ./node_modules/.bin/opencode --version
+          echo "OPENCODE_E2E_BIN=$RUNNER_TEMP/opencode-pinned/node_modules/.bin/opencode" >> "$GITHUB_ENV"
+      - run: npm run check
+      - run: npm audit --omit=dev
+      - run: npm pack --dry-run
