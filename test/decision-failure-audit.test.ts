@@ -17,10 +17,10 @@ afterEach(async () => {
   await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
-function client() {
+function client(decisionFailurePosture: "proceed" | "deny" = "deny") {
   process.env.ACS_AUDIT_TEST_KEY = TEST_KEY;
   return new AcsClient(parseConfig({
-    mode: "enforce", startupPosture: "refuse",
+    mode: "enforce", startupPosture: "refuse", decisionFailurePosture,
     guardian: { url: "http://127.0.0.1:8787/", hmacKeyEnv: "ACS_AUDIT_TEST_KEY", keyId: "test-key" },
   }, "/work"));
 }
@@ -115,7 +115,7 @@ describe("decision failure audit", () => {
       }
       return response;
     });
-    const acs = client();
+    const acs = client(posture);
     const state = newSessionState("host-session");
     state.handshake = await acs.handshake(state);
     state.handshake.on_decision_failure = posture;

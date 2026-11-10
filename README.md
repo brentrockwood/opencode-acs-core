@@ -49,7 +49,7 @@ HMAC follows merged ACS §10: HKDF-SHA256 with empty salt, the exact transmitted
 
 When `protectedResource` is configured, the plugin also registers `acs_protected_append`. A signed Guardian `ALLOW` must include a capability before the tool can execute. The fixed resource endpoint then verifies the capability independently. See [examples/remote-config.json](examples/remote-config.json) and [docs/protected-resource.md](docs/protected-resource.md).
 
-No configuration means no plugin behavior. `observe` mode never blocks. `enforce` mode requires an explicit `startupPosture`; `refuse` is the example posture.
+No configuration means no plugin behavior. `observe` mode never blocks. Both failure postures default to fail-safe. `startupPosture` (default `refuse`) applies to a handshake that gets no usable answer. `decisionFailurePosture` (default `deny`, or `proceed` when `startupPosture` is `proceed`) applies to a later step that gets no usable answer. Only this local configuration can opt into fail-open with `proceed`: the Guardian's negotiated `on_decision_failure` can tighten the local choice to `deny` but cannot loosen it, and a Guardian that omits the field leaves the local value in force. A verified refusal or an unverifiable answer blocks under either value. The examples set both explicitly.
 
 ## Decisions
 

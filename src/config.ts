@@ -4,6 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 export interface AcsConfig {
   mode: "observe" | "enforce";
   startupPosture: "proceed" | "refuse";
+  decisionFailurePosture: "proceed" | "deny";
   enableModify: boolean;
   guardian: {
     url: string;
@@ -47,15 +48,19 @@ function positiveInteger(value: unknown, fallback: number, label: string): numbe
 
 export function parseConfig(value: unknown, directory: string): AcsConfig {
   assertObject(value, "configuration");
-  assertKeys(value, ["mode", "startupPosture", "enableModify", "guardian", "audit", "agent", "protectedResource"], "configuration");
+  assertKeys(value, ["mode", "startupPosture", "decisionFailurePosture", "enableModify", "guardian", "audit", "agent", "protectedResource"], "configuration");
   const mode = value.mode ?? "observe";
   if (mode !== "observe" && mode !== "enforce") throw new Error("mode must be observe or enforce");
-  const startupPosture = value.startupPosture ?? "proceed";
+  // Fail-safe defaults: a handshake without a usable answer refuses, and a step without a
+  // usable answer denies. Local configuration alone may opt into fail-open; the Guardian's
+  // negotiated on_decision_failure can tighten that choice but never loosen it.
+  const startupPosture = value.startupPosture ?? "refuse";
   if (startupPosture !== "proceed" && startupPosture !== "refuse") {
     throw new Error("startupPosture must be proceed or refuse");
   }
-  if (mode === "enforce" && value.startupPosture === undefined) {
-    throw new Error("startupPosture must be explicit in enforce mode");
+  const decisionFailurePosture = value.decisionFailurePosture ?? (startupPosture === "proceed" ? "proceed" : "deny");
+  if (decisionFailurePosture !== "proceed" && decisionFailurePosture !== "deny") {
+    throw new Error("decisionFailurePosture must be proceed or deny");
   }
   if (value.enableModify !== undefined && typeof value.enableModify !== "boolean") {
     throw new Error("enableModify must be a boolean");
@@ -130,6 +135,7 @@ export function parseConfig(value: unknown, directory: string): AcsConfig {
   return {
     mode,
     startupPosture,
+    decisionFailurePosture,
     enableModify: value.enableModify === true,
     guardian: {
       url: url.toString(),

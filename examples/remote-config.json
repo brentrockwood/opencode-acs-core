@@ -1,6 +1,7 @@
 {
   "mode": "enforce",
   "startupPosture": "refuse",
+  "decisionFailurePosture": "deny",
   "enableModify": false,
   "guardian": {
     "url": "https://acs-demo.example.invalid/acs",
