@@ -33,6 +33,18 @@ npm run test:e2e
 
 The runtime suite starts only deterministic loopback fixtures. It uses no external model or Guardian credentials, but it does invoke the `opencode` binary on `PATH` and verifies that it reports `1.18.20`. Set `OPENCODE_E2E_BIN` to test another executable location.
 
+An interoperability suite, `test/guardian-interop.e2e.test.ts`, drives the client against the upstream Python example Guardian from specification commit `db457a8`. It runs when `ACS_UPSTREAM_GUARDIAN` names that executable and is skipped otherwise; CI installs it from that commit. Locally:
+
+```sh
+python3 -m venv .guardian && .guardian/bin/pip install "git+https://github.com/GenAI-Security-Project/agent-control-standard@db457a84393bd80954c9b70b2271a719bf7c61cd#subdirectory=adapters"
+```
+
+```sh
+ACS_UPSTREAM_GUARDIAN=$PWD/.guardian/bin/acs-example-guardian npm test
+```
+
+The recorded evidence and observations are in [docs/coverage.md](docs/coverage.md).
+
 For a manual loopback demonstration, set `OPENCODE_ACS_HMAC_KEY`, point a local copy of the example configuration at `http://127.0.0.1:8787/`, and run `npm run demo:guardian`. The demo allows requests except Bash commands containing `ACS_DEMO_DENY`. It is a protocol fixture, not a policy engine or remote authority.
 
 ## Project-plugin setup
