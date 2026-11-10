@@ -9,15 +9,30 @@ describe("configuration", () => {
   it("uses observation defaults", () => {
     const config = parseConfig(base, "/work");
     expect(config.mode).toBe("observe");
-    expect(config.startupPosture).toBe("proceed");
+    expect(config.startupPosture).toBe("refuse");
+    expect(config.decisionFailurePosture).toBe("deny");
     expect(config.enableModify).toBe(false);
     expect(config.audit.includePayloads).toBe(false);
     expect(config.agent.id).toBe("opencode");
   });
 
-  it("requires explicit fail posture and HMAC in enforce mode", () => {
-    expect(() => parseConfig({ ...base, mode: "enforce" }, "/work")).toThrow("startupPosture must be explicit");
+  it("requires HMAC in enforce mode and rejects unknown posture values", () => {
+    expect(() => parseConfig({ ...base, mode: "enforce" }, "/work")).toThrow("required in enforce mode");
     expect(() => parseConfig({ ...base, mode: "enforce", startupPosture: "refuse" }, "/work")).toThrow("required in enforce mode");
+    expect(() => parseConfig({ ...base, startupPosture: "deny" }, "/work")).toThrow("startupPosture must be proceed or refuse");
+    expect(() => parseConfig({ ...base, decisionFailurePosture: "refuse" }, "/work")).toThrow("decisionFailurePosture must be proceed or deny");
+  });
+
+  it("defaults both postures to fail-safe and lets only local configuration opt into fail-open", () => {
+    const guardian = { url: "http://127.0.0.1:8787", hmacKeyEnv: "ACS_KEY", keyId: "key-1" };
+    expect(parseConfig({ mode: "enforce", guardian }, "/work"))
+      .toMatchObject({ startupPosture: "refuse", decisionFailurePosture: "deny" });
+    expect(parseConfig({ mode: "enforce", startupPosture: "proceed", guardian }, "/work"))
+      .toMatchObject({ startupPosture: "proceed", decisionFailurePosture: "proceed" });
+    expect(parseConfig({ mode: "enforce", startupPosture: "refuse", decisionFailurePosture: "proceed", guardian }, "/work"))
+      .toMatchObject({ startupPosture: "refuse", decisionFailurePosture: "proceed" });
+    expect(parseConfig({ mode: "enforce", startupPosture: "proceed", decisionFailurePosture: "deny", guardian }, "/work"))
+      .toMatchObject({ startupPosture: "proceed", decisionFailurePosture: "deny" });
   });
 
   it("accepts a signed loopback enforcement configuration", () => {

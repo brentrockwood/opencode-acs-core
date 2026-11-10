@@ -171,16 +171,18 @@ describe("refusal, outage and integrity separation", () => {
 
 describe("OpenCode plugin lifecycle", () => {
   it.each([
-    { posture: "deny" as const, fails: false, blocked: false },
-    { posture: "proceed" as const, fails: true, blocked: false },
-    { posture: "deny" as const, fails: true, blocked: true },
-  ])("preserves enforcement with an unwritable audit file: %j", async ({ posture, fails, blocked }) => {
+    { posture: "deny" as const, local: "deny" as const, fails: false, blocked: false },
+    { posture: "proceed" as const, local: "proceed" as const, fails: true, blocked: false },
+    { posture: "proceed" as const, local: "deny" as const, fails: true, blocked: true },
+    { posture: "deny" as const, local: "proceed" as const, fails: true, blocked: true },
+    { posture: "deny" as const, local: "deny" as const, fails: true, blocked: true },
+  ])("preserves enforcement with an unwritable audit file, with the Guardian only able to tighten the local posture: %j", async ({ posture, local, fails, blocked }) => {
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const directory = await mkdtemp(join(tmpdir(), "opencode-acs-audit-posture-"));
     temporaryDirectories.add(directory);
     const configPath = join(directory, "acs.json");
     await writeFile(configPath, JSON.stringify({
-      mode: "enforce", startupPosture: "refuse",
+      mode: "enforce", startupPosture: "refuse", decisionFailurePosture: local,
       guardian: { url: "http://127.0.0.1:8787/", hmacKeyEnv: "OPENCODE_ACS_PLUGIN_TEST_KEY", keyId: "test-key" },
       audit: { path: directory },
     }));

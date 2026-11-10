@@ -14,6 +14,7 @@ import { validateRequest, validateResponse } from "../src/schema.js";
 const config = {
   mode: "observe",
   startupPosture: "proceed",
+  decisionFailurePosture: "proceed",
   enableModify: false,
   guardian: { url: "https://guardian.example/", connectTimeoutMs: 100, maxResponseBytes: 1024 },
   audit: { includePayloads: false },

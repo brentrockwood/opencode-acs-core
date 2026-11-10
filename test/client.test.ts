@@ -10,6 +10,7 @@ function config(timeout = 100, url = "http://127.0.0.1:8787/"): AcsConfig {
   return {
     mode: "enforce",
     startupPosture: "refuse",
+    decisionFailurePosture: "deny",
     enableModify: false,
     guardian: {
       url,
@@ -27,6 +28,25 @@ describe("Guardian client", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     delete process.env.OPENCODE_ACS_CLIENT_TEST_KEY;
+  });
+
+  it.each([
+    { local: "proceed", negotiated: "proceed", effective: "proceed" },
+    { local: "proceed", negotiated: undefined, effective: "proceed" },
+    { local: "proceed", negotiated: "deny", effective: "deny" },
+    { local: "deny", negotiated: "proceed", effective: "deny" },
+    { local: "deny", negotiated: undefined, effective: "deny" },
+    { local: "deny", negotiated: "deny", effective: "deny" },
+  ] as const)("lets the Guardian tighten the local decision-failure posture but never loosen it: %j", async ({ local, negotiated, effective }) => {
+    process.env.OPENCODE_ACS_CLIENT_TEST_KEY = TEST_KEY;
+    const guardian = createGuardian(() => ({}));
+    vi.stubGlobal("fetch", guardian.fetch);
+    const acs = new AcsClient({ ...config(), decisionFailurePosture: local });
+    const state = newSessionState("tighten-only");
+    state.handshake = await acs.handshake(state);
+    if (negotiated) state.handshake.on_decision_failure = negotiated;
+    else delete state.handshake.on_decision_failure;
+    expect(acs.failurePosture(state)).toBe(effective);
   });
 
   it("accepts a signed direct ServerHello over HTTP and verifies a signed tool decision", async () => {

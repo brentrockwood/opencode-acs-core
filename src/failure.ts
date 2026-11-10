@@ -7,8 +7,9 @@ import { AcsClientError } from "./types.js";
  * one that did not. The maintainers' rulings on issue #32 (2026-11-04 and 2026-11-05)
  * spell out the split this adapter applies locally:
  *
- * - `availability`: no usable answer arrived. The configured posture decides:
- *   `startupPosture` for the handshake, the negotiated `on_decision_failure` after it.
+ * - `availability`: no usable answer arrived. The effective posture decides:
+ *   `startupPosture` for the handshake, and after it the local `decisionFailurePosture`
+ *   as tightened (never loosened) by the negotiated `on_decision_failure`.
  *   Covers a silent Guardian, a connection or TLS failure, HTTP 408 or 5xx without a
  *   JSON-RPC body, and an authenticated `-32603` internal error.
  * - `refusal`: the Guardian answered and declined. Covers every authenticated JSON-RPC
@@ -20,7 +21,8 @@ import { AcsClientError } from "./types.js";
  *   and local request faults.
  *
  * Refusal and integrity block in enforce mode under either posture. Observe mode never
- * blocks. The default posture itself is unchanged by this classification.
+ * blocks. Both postures default to fail-safe (`refuse`, `deny`); only local configuration
+ * can opt into fail-open.
  */
 export type FailureDisposition = "availability" | "refusal" | "integrity";
 

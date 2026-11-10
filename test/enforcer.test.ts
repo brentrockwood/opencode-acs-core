@@ -6,6 +6,7 @@ import type { AcsResult } from "../src/types.js";
 const config = {
   mode: "enforce",
   startupPosture: "refuse",
+  decisionFailurePosture: "deny",
   enableModify: true,
   guardian: { url: "http://127.0.0.1/", connectTimeoutMs: 100, maxResponseBytes: 1024 },
   audit: { includePayloads: false },

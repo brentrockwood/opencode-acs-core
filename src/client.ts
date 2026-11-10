@@ -280,8 +280,11 @@ export class AcsClient {
     return result;
   }
 
+  // The effective posture for a step that gets no usable answer: local policy sets it, and
+  // the Guardian's negotiated on_decision_failure can tighten it to deny but cannot loosen it.
   failurePosture(state: SessionState): "proceed" | "deny" {
-    return state.handshake?.on_decision_failure ?? "proceed";
+    if (this.config.decisionFailurePosture === "deny") return "deny";
+    return state.handshake?.on_decision_failure === "deny" ? "deny" : "proceed";
   }
 
   isEvaluated(state: SessionState, method: string): boolean {

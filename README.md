@@ -33,6 +33,18 @@ npm run test:e2e
 
 The runtime suite starts only deterministic loopback fixtures. It uses no external model or Guardian credentials, but it does invoke the `opencode` binary on `PATH` and verifies that it reports `1.18.20`. Set `OPENCODE_E2E_BIN` to test another executable location.
 
+An interoperability suite, `test/guardian-interop.e2e.test.ts`, drives the client against the upstream Python example Guardian from specification commit `db457a8`. It runs when `ACS_UPSTREAM_GUARDIAN` names that executable and is skipped otherwise; CI installs it from that commit. Locally:
+
+```sh
+python3 -m venv .guardian && .guardian/bin/pip install "git+https://github.com/GenAI-Security-Project/agent-control-standard@db457a84393bd80954c9b70b2271a719bf7c61cd#subdirectory=adapters"
+```
+
+```sh
+ACS_UPSTREAM_GUARDIAN=$PWD/.guardian/bin/acs-example-guardian npm test
+```
+
+The recorded evidence and observations are in [docs/coverage.md](docs/coverage.md).
+
 For a manual loopback demonstration, set `OPENCODE_ACS_HMAC_KEY`, point a local copy of the example configuration at `http://127.0.0.1:8787/`, and run `npm run demo:guardian`. The demo allows requests except Bash commands containing `ACS_DEMO_DENY`. It is a protocol fixture, not a policy engine or remote authority.
 
 ## Project-plugin setup
@@ -49,7 +61,7 @@ HMAC follows merged ACS §10: HKDF-SHA256 with empty salt, the exact transmitted
 
 When `protectedResource` is configured, the plugin also registers `acs_protected_append`. A signed Guardian `ALLOW` must include a capability before the tool can execute. The fixed resource endpoint then verifies the capability independently. See [examples/remote-config.json](examples/remote-config.json) and [docs/protected-resource.md](docs/protected-resource.md).
 
-No configuration means no plugin behavior. `observe` mode never blocks. `enforce` mode requires an explicit `startupPosture`; `refuse` is the example posture.
+No configuration means no plugin behavior. `observe` mode never blocks. Both failure postures default to fail-safe. `startupPosture` (default `refuse`) applies to a handshake that gets no usable answer. `decisionFailurePosture` (default `deny`, or `proceed` when `startupPosture` is `proceed`) applies to a later step that gets no usable answer. Only this local configuration can opt into fail-open with `proceed`: the Guardian's negotiated `on_decision_failure` can tighten the local choice to `deny` but cannot loosen it, and a Guardian that omits the field leaves the local value in force. A verified refusal or an unverifiable answer blocks under either value. The examples set both explicitly.
 
 ## Decisions
 
