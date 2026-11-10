@@ -6,6 +6,8 @@ import { ACS_VERSION, OPENCODE_VERSION } from "./types.js";
 export const METHODS_IMPLEMENTED = [
   "steps/sessionStart",
   "steps/sessionEnd",
+  "steps/subagentStart",
+  "steps/subagentStop",
   "steps/toolCallRequest",
   "steps/toolCallResult",
 ] as const;
@@ -19,8 +21,14 @@ export function newSessionState(sessionId: string): SessionState {
   return { sessionId: randomUUID(), hostSessionId: sessionId, guarded: false, refuseActions: false };
 }
 
-export function buildRequest(config: AcsConfig, state: SessionState, method: string, payload: JsonObject): AcsRequestEnvelope {
-  const requestId = randomUUID();
+export function buildRequest(
+  config: AcsConfig,
+  state: SessionState,
+  method: string,
+  payload: JsonObject,
+  explicitRequestId?: string,
+): AcsRequestEnvelope {
+  const requestId = explicitRequestId ?? randomUUID();
   return {
     jsonrpc: "2.0",
     method,
@@ -42,6 +50,28 @@ export function buildRequest(config: AcsConfig, state: SessionState, method: str
       payload,
     },
   };
+}
+
+export function subagentStartPayload(
+  parent: SessionState,
+  child: SessionState,
+  parentStepId: string,
+  input: Record<string, unknown>,
+): JsonObject {
+  return {
+    subagent_session_id: child.sessionId,
+    parent_session_id: parent.sessionId,
+    parent_step_id: parentStepId,
+    intent_derivation: "derived_from_parent",
+    ...(typeof input.prompt === "string" ? { subagent_intent: { raw: input.prompt } } : {}),
+    ...(typeof input.subagent_type === "string"
+      ? { subagent_descriptor: { agent_name: input.subagent_type } }
+      : {}),
+  };
+}
+
+export function subagentStopPayload(child: SessionState, outcome: "completed" | "failed" | "cancelled" | "timeout"): JsonObject {
+  return { subagent_session_id: child.sessionId, outcome };
 }
 
 export function clientHello(): JsonObject {

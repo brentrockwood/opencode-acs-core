@@ -6,15 +6,17 @@ const port = Number(process.env.OPENCODE_ACS_DEMO_PORT ?? "8787");
 const inputKeyMaterial = process.env.OPENCODE_ACS_HMAC_KEY;
 const keyId = process.env.OPENCODE_ACS_KEY_ID ?? "demo-key-id";
 
-if (!inputKeyMaterial) throw new Error("OPENCODE_ACS_HMAC_KEY is required");
+if (!inputKeyMaterial || Buffer.byteLength(inputKeyMaterial, "utf8") < 32) {
+  throw new Error("OPENCODE_ACS_HMAC_KEY must contain at least 32 UTF-8 bytes");
+}
 if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("OPENCODE_ACS_DEMO_PORT is invalid");
 
 function sessionKey(sessionId) {
   return Buffer.from(hkdfSync(
     "sha256",
     Buffer.from(inputKeyMaterial, "utf8"),
+    Buffer.alloc(0),
     Buffer.from(sessionId, "utf8"),
-    Buffer.from("opencode-acs-core/v0.1.0/HMAC-SHA256", "utf8"),
     32,
   ));
 }
@@ -23,6 +25,7 @@ function canonicalEnvelope(envelope) {
   const value = structuredClone(envelope);
   if (value.params) delete value.params.signature;
   if (value.result) delete value.result.signature;
+  if (value.error) delete value.error.signature;
   return canonicalize(value);
 }
 
@@ -39,21 +42,6 @@ function validRequest(request, key) {
 }
 
 function resultFor(request) {
-  if (request.method === "handshake/hello") {
-    return {
-      decision: "allow",
-      payload: {
-        negotiated_version: "0.1.0",
-        methods_evaluated: request.params.payload.methods_implemented,
-        selected_transport: "http",
-        signature_algorithms_supported: ["HMAC-SHA256"],
-        timeout_config: { default_ms: 2000 },
-        on_decision_failure: "deny",
-        policy_requires_provenance: false,
-        profiles_accepted: [],
-      },
-    };
-  }
   if (request.method === "steps/toolCallRequest" && String(request.params.payload.raw_command ?? "").includes("ACS_DEMO_DENY")) {
     return { decision: "deny", reasoning: "blocked by the demo Guardian marker" };
   }
@@ -73,25 +61,44 @@ const server = createServer(async (incoming, outgoing) => {
     const id = request?.params?.metadata?.session_id;
     if (typeof id !== "string") throw new Error("request has no session id");
     const key = sessionKey(id);
-    if (!validRequest(request, key)) {
+    if (request.method !== "system/ping" && !validRequest(request, key)) {
       outgoing.writeHead(401).end();
       return;
     }
-    const response = {
-      jsonrpc: "2.0",
-      id: request.id,
-      result: {
+    if (request.method === "steps/toolCallRequest" && String(request.params.payload.raw_command ?? "").includes("ACS_DEMO_REFUSE")) {
+      // A signed JSON-RPC error other than -32603 is a refusal: the adapter blocks the
+      // step under either failure posture instead of treating it as an outage.
+      const error = { code: -32000, message: "refused by the demo Guardian marker" };
+      const refusal = { jsonrpc: "2.0", id: request.id, error };
+      error.signature = { algorithm: "HMAC-SHA256", value: signature(refusal, key).toString("base64"), key_id: keyId };
+      outgoing.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(refusal));
+      return;
+    }
+    const result = request.method === "handshake/hello"
+      ? {
+          negotiated_version: "0.1.0",
+          methods_evaluated: request.params.payload.methods_implemented,
+          selected_transport: "http",
+          signature_algorithms_supported: ["HMAC-SHA256"],
+          timeout_config: { default_ms: 2000 },
+          on_decision_failure: "deny",
+          policy_requires_provenance: false,
+          profiles_accepted: [],
+        }
+      : {
         type: "final",
         acs_version: "0.1.0",
         request_id: request.params.request_id,
         ...resultFor(request),
-      },
-    };
-    response.result.signature = {
-      algorithm: "HMAC-SHA256",
-      value: signature(response, key).toString("base64"),
-      key_id: keyId,
-    };
+      };
+    const response = { jsonrpc: "2.0", id: request.id, result };
+    if (request.method !== "system/ping") {
+      result.signature = {
+        algorithm: "HMAC-SHA256",
+        value: signature(response, key).toString("base64"),
+        key_id: keyId,
+      };
+    }
     outgoing.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(response));
   } catch (error) {
     outgoing.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: String(error) }));
@@ -100,5 +107,5 @@ const server = createServer(async (incoming, outgoing) => {
 
 server.listen(port, "127.0.0.1", () => {
   process.stdout.write(`Demo Guardian listening on http://127.0.0.1:${port}/\n`);
-  process.stdout.write("Commands containing ACS_DEMO_DENY are denied. This is a fixture, not a policy service.\n");
+  process.stdout.write("Commands containing ACS_DEMO_DENY are denied; ACS_DEMO_REFUSE returns a signed refusal. This is a fixture, not a policy service.\n");
 });

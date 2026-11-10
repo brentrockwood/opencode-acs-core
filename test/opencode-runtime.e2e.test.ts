@@ -176,6 +176,7 @@ async function createWorkspace(
   mcpTool = false,
   protectedResourceUrl?: string,
   hmacKeyId = TEST_KEY_ID,
+  startupPosture: "proceed" | "refuse" = "refuse",
 ): Promise<{ directory: string; auditPath: string }> {
   const directory = join(base, "workspace");
   const pluginDirectory = join(directory, ".opencode", "plugins");
@@ -221,7 +222,7 @@ export const CustomProbe = async () => ({
   await writeFile(join(directory, "opencode.json"), JSON.stringify(openCodeConfig));
   await writeFile(join(base, "acs.json"), JSON.stringify({
     mode: "enforce",
-    startupPosture: "refuse",
+    startupPosture,
     enableModify,
     guardian: {
       url: `${guardianUrl}/`,
@@ -246,6 +247,7 @@ async function runOpenCode(
   protectedResourceUrl?: string,
   hmacKey = TEST_KEY,
   hmacKeyId = TEST_KEY_ID,
+  startupPosture: "proceed" | "refuse" = "refuse",
 ): Promise<OpenCodeRun> {
   const { directory, auditPath } = await createWorkspace(
     base,
@@ -256,6 +258,7 @@ async function runOpenCode(
     mcpTool,
     protectedResourceUrl,
     hmacKeyId,
+    startupPosture,
   );
   const child = spawn(openCodeCli, [
     "run",
@@ -304,9 +307,17 @@ async function runDirectServerShell(
   guardianUrl: string,
   modelUrl: string,
   command: string,
-): Promise<{ response: string; stdout: string; stderr: string }> {
+): Promise<{ response: string; stdout: string; stderr: string; timings: Record<string, number> }> {
+  // Phase timings are returned so a failure can be attributed to a phase instead of
+  // being guessed at. Every request is bounded: the health probe (2 s per attempt within
+  // the 10 s readiness deadline), session creation and the shell call (15 s each), and the
+  // 2 s shutdown grace in the finally block.
+  const timings: Record<string, number> = {};
+  let mark = Date.now();
+  const lap = (name: string) => { const now = Date.now(); timings[name] = now - mark; mark = now; };
   const { directory } = await createWorkspace(base, guardianUrl, modelUrl);
   const port = await reservePort();
+  lap("workspace_ms");
   const url = `http://127.0.0.1:${port}`;
   const child = spawn(openCodeCli, ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: directory,
@@ -329,23 +340,35 @@ async function runDirectServerShell(
     const deadline = Date.now() + 10_000;
     while (true) {
       try {
-        const health = await fetch(`${url}/global/health`);
+        // Bounded so a socket that accepts but never answers cannot stall the poll past
+        // the readiness deadline below.
+        const health = await fetch(`${url}/global/health`, { signal: AbortSignal.timeout(2_000) });
         if (health.ok) break;
       } catch {
-        // The server has not bound yet.
+        // The server has not bound yet, or did not answer in time.
       }
       if (Date.now() > deadline) throw new Error(`OpenCode server did not start\nstdout:\n${stdout}\nstderr:\n${stderr}`);
       await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     }
-    const sessionResponse = await fetch(`${url}/session`, {
+    lap("serve_ready_ms");
+    const bounded = async (phase: string, request: () => Promise<Response>): Promise<Response> => {
+      try {
+        return await request();
+      } catch (error) {
+        throw new Error(`${phase} did not complete within its bound: ${String(error)}\ntimings so far: ${JSON.stringify(timings)}\nserver stdout:\n${stdout}\nserver stderr:\n${stderr}`);
+      }
+    };
+    const sessionResponse = await bounded("session create", () => fetch(`${url}/session`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ title: "ACS direct shell probe" }),
-    });
+      signal: AbortSignal.timeout(15_000),
+    }));
     if (!sessionResponse.ok) throw new Error(`session creation failed: ${sessionResponse.status} ${await sessionResponse.text()}`);
     const session = await sessionResponse.json() as JsonObject;
     if (typeof session.id !== "string") throw new Error(`session response has no id: ${JSON.stringify(session)}`);
-    const shellResponse = await fetch(`${url}/session/${session.id}/shell`, {
+    lap("session_create_ms");
+    const shellResponse = await bounded("direct shell", () => fetch(`${url}/session/${session.id}/shell`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -353,10 +376,12 @@ async function runDirectServerShell(
         model: { providerID: "acs-e2e", modelID: "acs-e2e-model" },
         command,
       }),
-    });
+      signal: AbortSignal.timeout(15_000),
+    }));
     const response = await shellResponse.text();
+    lap("shell_roundtrip_ms");
     if (!shellResponse.ok) throw new Error(`direct shell failed: ${shellResponse.status} ${response}`);
-    return { response, stdout, stderr };
+    return { response, stdout, stderr, timings };
   } finally {
     child.kill("SIGTERM");
     await new Promise<void>((resolveExit) => {
@@ -372,20 +397,31 @@ async function runDirectServerShell(
   }
 }
 
+// Per-case budget. Measured 2026-11-09: about 5.5 s per case on the development machine,
+// about 7.7 s on a GitHub-hosted runner, and 12.7-15.2 s for the first launch on a fresh
+// runner, which carries OpenCode's one-time cold start. 30 s leaves a margin for that first
+// case without hiding a hang; the direct-shell case bounds its own phases separately.
+const RUNTIME_CASE_TIMEOUT_MS = 30_000;
+
 describe("real OpenCode 1.18.20 runtime enforcement", () => {
   let guardianServer: ListeningServer | undefined;
   let modelServer: ListeningServer | undefined;
   const directories = new Set<string>();
+  let refuseHandshake = false;
   const guardian = createGuardian((request) => {
-    if (request.method !== "steps/toolCallRequest") return {};
+    if (request.method === "handshake/hello" && refuseHandshake) {
+      return { error: { code: -32000, message: "session refused by deterministic Guardian" } };
+    }
+    if (request.method !== "steps/toolCallRequest" && request.method !== "steps/subagentStart") return {};
     const command = argument(request, "command");
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-deny")) {
+    const payloadText = JSON.stringify(request.params.payload);
+    if (payloadText.includes("acs-deny")) {
       return { result: { decision: "deny", reasoning: "blocked by deterministic Guardian" } };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-malformed")) {
+    if (payloadText.includes("acs-malformed")) {
       return { raw: "not-json" };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-ask")) {
+    if (payloadText.includes("acs-ask")) {
       return {
         result: {
           decision: "ask",
@@ -398,7 +434,7 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
         },
       };
     }
-    if (JSON.stringify(request.params.payload.arguments).includes("acs-defer")) {
+    if (payloadText.includes("acs-defer")) {
       return {
         result: {
           decision: "defer",
@@ -578,7 +614,7 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     );
   });
 
-  it("denies a task launch without claiming child-session coverage", async () => {
+  it("denies a task launch at steps/subagentStart before a child is created", async () => {
     const base = await temporary("opencode-acs-task-deny-");
     const offset = guardian.requests.length;
     const result = await runOpenCode(
@@ -591,11 +627,63 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
         subagent_type: "general",
       }),
     );
-    const taskRequest = guardian.requests.slice(offset).find((request) =>
-      request.method === "steps/toolCallRequest" && request.params.payload.tool
-        && (request.params.payload.tool as JsonObject).name === "task");
+    const taskRequest = guardian.requests.slice(offset).find((request) => request.method === "steps/subagentStart");
     expect(taskRequest).toBeDefined();
+    expect(taskRequest?.params.payload.parent_step_id).toBe(taskRequest?.params.request_id);
+    expect(guardian.requests.slice(offset).some((request) =>
+      request.method === "steps/sessionStart"
+      && request.params.metadata.session_id === taskRequest?.params.payload.subagent_session_id)).toBe(false);
     expect(result.stdout).toContain("ACS denied task");
+  });
+
+  it("binds an allowed task child to the ACS subagent session before child tools run", async () => {
+    const base = await temporary("opencode-acs-task-allow-");
+    const target = join(base, "child.txt");
+    const offset = guardian.requests.length;
+    await runOpenCode(
+      base,
+      guardianServer!.url,
+      modelServer!.url,
+      toolPrompt("task", {
+        description: "deterministic child",
+        prompt: `printf child > ${JSON.stringify(target)}`,
+        subagent_type: "general",
+      }),
+    );
+    expect(await readFile(target, "utf8")).toBe("child");
+    const requests = guardian.requests.slice(offset);
+    const startIndex = requests.findIndex((request) => request.method === "steps/subagentStart");
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    const start = requests[startIndex]!;
+    const childAcsID = start.params.payload.subagent_session_id;
+    expect(childAcsID).toMatch(/^[0-9a-f-]{36}$/);
+    const childSessionIndex = requests.findIndex((request) =>
+      request.method === "steps/sessionStart" && request.params.metadata.session_id === childAcsID);
+    const childToolIndex = requests.findIndex((request) =>
+      request.method === "steps/toolCallRequest" && request.params.metadata.session_id === childAcsID);
+    const stop = requests.find((request) => request.method === "steps/subagentStop");
+    expect(childSessionIndex).toBeGreaterThan(startIndex);
+    expect(childToolIndex).toBeGreaterThan(childSessionIndex);
+    expect(stop?.params.payload).toEqual({ subagent_session_id: childAcsID, outcome: "completed" });
+    expect(stop?.params.metadata.session_id).toBe(start.params.metadata.session_id);
+  });
+
+  it("releases a task that fails before creating a child, using the host's error part", async () => {
+    const base = await temporary("opencode-acs-failed-task-");
+    const requestOffset = guardian.requests.length;
+    const run = await runOpenCode(
+      base,
+      guardianServer!.url,
+      modelServer!.url,
+      toolPrompt("task", { description: "doomed child", prompt: "inspect", subagent_type: "does-not-exist" }),
+    );
+    expect(guardian.requests.slice(requestOffset).filter((request) => request.method === "steps/subagentStart")).toHaveLength(1);
+    expect(guardian.requests.slice(requestOffset).some((request) => request.method === "steps/subagentStop")).toBe(false);
+    const failed = run.audit.filter((event) => event.event === "acs_subagent_launch_failed");
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ host_session_id: expect.any(String), call_id: expect.any(String), message: "[omitted]" });
+    expect(failed[0]?.child_host_session_id).toBeUndefined();
+    expect(run.audit.some((event) => event.event === "acs_subagent_session_bound")).toBe(false);
   });
 
   it("records that the direct server shell bypasses the model-tool hook", async () => {
@@ -609,8 +697,15 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
       `printf direct > ${JSON.stringify(target)} # acs-deny`,
     );
     const toolRequests = guardian.requests.slice(offset).filter((request) => request.method === "steps/toolCallRequest");
+    console.log(`direct-shell phase timings: ${JSON.stringify(run.timings)}`);
     expect(await readFile(target, "utf8"), `server response: ${run.response}\nstderr: ${run.stderr}`).toBe("direct");
     expect(toolRequests).toHaveLength(0);
+    // Measured on 2026-11-09 against OpenCode 1.18.20. macOS: serve ready ~0.6 s, session
+    // create (the first real request, where the server initializes lazily) 3.7-5.4 s, shell
+    // round trip ~1.6 s. Linux (node:22 container): ready ~2.8 s, session create ~7.2 s,
+    // shell ~0.3 s. The earlier timeouts on Linux were not slowness: the server's listening
+    // socket accepts a connection before it can answer, and an unbounded first health probe
+    // hung on it. The probe is now bounded, so the suite default applies here.
   });
 
   it("intercepts and denies a plugin-defined custom tool with complete arguments", async () => {
@@ -690,6 +785,36 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
     );
     await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
     expect(run.audit.some((event) => event.event === "acs_startup_refused")).toBe(true);
+  });
+
+  it("refuses tool execution on a signed handshake refusal even with startup proceed", async () => {
+    const base = await temporary("opencode-acs-refused-");
+    const target = join(base, "refused.txt");
+    const requestOffset = guardian.requests.length;
+    refuseHandshake = true;
+    let run: OpenCodeRun;
+    try {
+      run = await runOpenCode(
+        base,
+        guardianServer!.url,
+        modelServer!.url,
+        `printf refused > ${JSON.stringify(target)}`,
+        false,
+        false,
+        false,
+        undefined,
+        TEST_KEY,
+        TEST_KEY_ID,
+        "proceed",
+      );
+    } finally {
+      refuseHandshake = false;
+    }
+    await expect(access(target)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(guardian.requests.slice(requestOffset).map((request) => request.method)).toEqual(["handshake/hello"]);
+    expect(run.stdout).toContain("refused the session");
+    expect(run.audit.some((event) => event.event === "acs_startup_refused" && event.disposition === "refusal" && event.error_code === -32000)).toBe(true);
+    expect(run.audit.some((event) => event.event === "acs_session_unguarded")).toBe(false);
   });
 
   const remoteBaseUrl = process.env.ACS_REMOTE_TEST_URL;
@@ -776,4 +901,4 @@ describe("real OpenCode 1.18.20 runtime enforcement", () => {
       delete process.env[keyEnvironment];
     }
   }, 40_000);
-});
+}, RUNTIME_CASE_TIMEOUT_MS);

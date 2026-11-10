@@ -9,11 +9,11 @@ It is not a sandbox. An operator who controls OpenCode can remove the plugin, us
 ## What is proven on 1.18.20
 
 - `ALLOW` and `DENY` at the pre-execution hook for built-in `bash`, `read`, `edit`, `write`, and `apply_patch` calls.
-- A denied `task` launch is stopped at the parent tool boundary; this does not establish coverage inside a child session.
+- A fresh foreground `task` is gated as `steps/subagentStart`; denial prevents child creation, while an allowed child is bound through OpenCode's `parentID` session relationship before its first tested tool call. Successful foreground completion emits `steps/subagentStop`. Resume, background completion, and failed/cancelled termination remain outside this claim.
 - Plugin-defined custom tools and an inert local MCP tool reach the same hook with complete fixture arguments and can be denied before their side effects.
 - Allowed results reach `steps/toolCallResult` and retain their request correlation.
 - Parallel sibling calls retain distinct request/result correlations.
-- Malformed output, an unavailable Guardian under refuse posture, and unsupported `ASK`/`DEFER` decisions fail closed.
+- Malformed output, signed Guardian refusals, verification failures, an unavailable Guardian under refuse posture, and unsupported `ASK`/`DEFER` decisions fail closed. Only a Guardian that gives no usable answer follows a `proceed` posture.
 - A Guardian-modified Bash command reaches execution when `enableModify` is true; no other modification shape or tool family is supported.
 - `POST /session/:id/shell` executes without a `steps/toolCallRequest`. It is an explicit bypass.
 - The first-party `acs_protected_append` tool obtains a signed, value-bound, 30-second capability from the Guardian and uses it at a private remote resource. The capability stays in plugin memory rather than model-visible arguments.
@@ -45,6 +45,8 @@ export { AcsPlugin } from "/absolute/path/to/acs-core/opencode/src/index.ts";
 
 Copy [examples/config.json](examples/config.json) to `.opencode/acs-core.json`, replace the endpoint and key names, then provide the HMAC key through the configured environment variable. Enforce mode requires both a key environment-variable name and a key ID. Non-loopback Guardian endpoints must use HTTPS.
 
+HMAC follows merged ACS §10: HKDF-SHA256 with empty salt, the exact transmitted `session_id` as UTF-8 info (no normalization), and 32-byte output. The configured secret must contain at least 32 UTF-8 bytes from a cryptographically secure random source, not a passphrase. Configuration remains literal UTF-8 text; base64-looking values are not decoded, and `keyId` remains the configured opaque label. Upgrade adapters and Guardians, including the local and remote demos, together. There is no fallback to the old adapter-specific derivation.
+
 When `protectedResource` is configured, the plugin also registers `acs_protected_append`. A signed Guardian `ALLOW` must include a capability before the tool can execute. The fixed resource endpoint then verifies the capability independently. See [examples/remote-config.json](examples/remote-config.json) and [docs/protected-resource.md](docs/protected-resource.md).
 
 No configuration means no plugin behavior. `observe` mode never blocks. `enforce` mode requires an explicit `startupPosture`; `refuse` is the example posture.
@@ -66,3 +68,9 @@ Local audit writing is passive: a write failure does not change an enforcement d
 This is an experimental adapter, not an official OpenCode integration, not an OWASP-endorsed implementation, and not a claim of ACS conformance. It is not being published to npm as part of this work.
 
 The deployed demonstration establishes the remote capability protocol and withholds the resource-signing key from OpenCode. It does not establish that the workstation lacks another authorization path: the workstation operator retains administrative SSH access to the deployment host, and an unsandboxed process running as that user may be able to use it. The demonstrated claim is therefore the enrolled ACS tool path, not resistance to the local process or human operator through every available route.
+
+### Decision-failure audit
+
+Failed exchanges are recorded under both failure postures and counted per session in `summary.decision_failures` at session end. Without `audit.path`, these records go to stderr; failed file writes also fall back to stderr. Capture that stream if no writable audit file is configured. Audit delivery does not change enforcement and is not guaranteed durable.
+
+Audit message text is omitted along with payloads unless file payload logging is explicitly enabled. Stderr fallback always omits both, including when an opted-in file sink fails. Failure class, kind and correlation IDs remain available.

@@ -31,7 +31,7 @@ Deployments that expose the OpenCode server must separately disable or isolate u
 
 ## Transport and keys
 
-Enforce mode requires HMAC-SHA256 request and response authentication. Session keys are derived from configured input key material and the canonical ACS session UUID. Keys are read from an environment variable named in configuration and are never accepted in the Guardian URL. The adapter refuses non-loopback plaintext HTTP in enforce mode.
+Enforce mode requires HMAC-SHA256 request and response authentication. Session keys use HKDF-SHA256 with empty salt, the exact transmitted ACS session ID as UTF-8 info without normalization, and 32-byte output. Configured secrets are literal UTF-8 text and must contain at least 32 bytes from a cryptographically secure random source, not a passphrase. Length is checked; randomness cannot be checked. Keys are read from an environment variable named in configuration and are never accepted in the Guardian URL. The adapter refuses non-loopback plaintext HTTP in enforce mode.
 
 HMAC authenticates a peer that knows the shared secret; it does not establish independent operator identity. Production key injection and rotation are deployment responsibilities. A production deployment should use HTTPS even on networks considered private.
 
@@ -39,13 +39,25 @@ Requests include UUID request IDs, timestamps, nonces, and session chain hashes 
 
 ## Failure behavior
 
-Enforce mode requires the startup posture to be explicit. Under `refuse`, an unavailable or invalid Guardian blocks tool execution. After a successful handshake, the Guardian's negotiated `on_decision_failure` value selects proceed or deny behavior. Every fail-open event is written to the configured audit sink when possible.
+A failed Guardian exchange is resolved by what failed, not only by the configured posture. The pinned specification distinguishes a Guardian that answered from one that did not (§4.1, §6.4). This adapter applies the split the maintainers set out on upstream issue #32 on 2026-11-04 and 2026-11-05 as documented local policy:
+
+- **No usable answer** follows the configured posture: a silent Guardian past the timeout, a connection or TLS failure, an HTTP 408 or 5xx without a JSON-RPC body, or an authenticated `-32603` internal error.
+- **A refusal blocks under either posture**: any authenticated JSON-RPC error other than `-32603`, including `SESSION_REFUSED`, `UNSUPPORTED_VERSION` and `PROVENANCE_REQUIRED`, and any other HTTP 4xx without a JSON-RPC body. A JSON-RPC error carried on a non-2xx status is read and verified before the status is used.
+- **An integrity failure blocks under either posture**: a missing or invalid signature, an unexpected key label, a JSON-RPC id or `request_id` mismatch, a malformed or oversized response (a malformed `allow` included), an unsupported decision, or a request this adapter could not form validly.
+
+Enforce mode requires the startup posture to be explicit. It applies to a handshake that gets no usable answer: under `refuse` an unavailable Guardian blocks tool execution and records `acs_startup_refused`; under `proceed` the session starts unguarded and records `acs_session_unguarded`. A handshake refusal or an unverifiable handshake refuses the session under either value. After a successful handshake, the negotiated `on_decision_failure` applies to steps that get no usable answer: `deny` blocks and `proceed` records `acs_fail_open` and allows. Observe mode never blocks. The post-tool result hook remains observational in every case.
+
+Two consequences deserve a direct statement. A request payload above the advertised 1 MiB limit is a local request fault: the Guardian never sees it, so in enforce mode the step blocks under either posture, where it previously failed open under `proceed`. A success body on a failure status is contradictory and is treated as an integrity failure rather than honored. Host-handler records label a non-adapter error's `failure_kind` as `other`, not `transport`.
+
+The default posture is unchanged by this classification. The upstream proposal to make `deny` the default and to let a Guardian only tighten the local choice has not merged; adopting it is a separate deployment decision. Every failed exchange is recorded under both postures with its failure class, its disposition (`availability`, `refusal` or `integrity`) and, when present, the JSON-RPC error code or HTTP status. Without a file path, failure records go to stderr; a failed file write also falls back to stderr without changing enforcement. Operators must capture stderr or provide a writable audit file. This is not a durable-delivery guarantee.
 
 `ASK` and `DEFER` fail closed. There is no fallback to a local approval prompt because that would not be independent authorization. `MODIFY` fails closed unless it is enabled and contains exactly one supported Bash command replacement.
 
 ## Audit privacy
 
-Payload bodies are omitted by default because tool arguments and results can contain source code, credentials, user data, and file contents. Enabling payloads is an explicit privacy decision. The optional local JSONL file is controlled by the same local operator and is not tamper-resistant evidence.
+Payload bodies and message text are omitted by default because tool arguments, results and Guardian error text can contain source code, credentials, user data, and file contents. Enabling payloads is an explicit privacy decision that also writes message text. The optional local JSONL file is controlled by the same local operator and is not tamper-resistant evidence.
+
+Without `audit.path`, decision-failure records are written to stderr. When a configured file cannot be written, the record also falls back to stderr. The stderr fallback always omits payload and message text, including when an opted-in file sink fails. Failure class, kind, disposition and correlation IDs remain available in every record.
 
 ## Protected resources
 
@@ -56,3 +68,4 @@ This establishes the remote capability flow and keeps the resource-signing key o
 ## Reporting
 
 Do not include Guardian keys, captured payloads, or sensitive workspace data in a report. This repository currently has no published security contact or coordinated disclosure commitment.
+

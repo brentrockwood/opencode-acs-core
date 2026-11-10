@@ -29,3 +29,5 @@ The ACS client key may be copied to a temporary local environment for testing. T
 The fixed demo policy denies every tool except `acs_protected_append`, denies protected values containing `deny`, and issues a capability for other nonempty values up to 512 bytes. This is not a general policy engine.
 
 The server is separate from the OpenCode process, but the workstation may retain a sudo-capable SSH path to the deployment host. Because the adapter is not a credential sandbox, do not use this deployment as evidence that the local process or human operator lacks all bypass paths.
+
+The Guardian uses merged ACS §10 HMAC derivation: HKDF-SHA256, empty salt, exact transmitted session-ID UTF-8 info, and 32-byte output. Upgrade it together with the adapter; there is no legacy fallback. `ACS_DEMO_CLIENT_KEY` remains literal UTF-8 text and must contain at least 32 bytes. The installer already generates a random key above this minimum and preserves existing secrets.

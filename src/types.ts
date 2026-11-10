@@ -62,14 +62,22 @@ export interface AcsResult {
 export interface AcsResponseEnvelope {
   jsonrpc: "2.0";
   id: string | number | null;
-  result?: AcsResult;
-  error?: { code: number; message: string; data?: unknown };
+  result?: AcsResult | ServerHello;
+  error?: AcsError;
+}
+
+export interface AcsError {
+  code: number;
+  message: string;
+  data?: unknown;
+  signature?: AcsSignature;
 }
 
 export interface ServerHello {
   negotiated_version: string;
   methods_evaluated: string[];
   selected_transport: "http" | "https" | "stdio";
+  signature?: AcsSignature;
   signature_algorithms_supported?: string[];
   timeout_config: {
     default_ms: number;
@@ -87,9 +95,16 @@ export interface SessionState {
   hostSessionId: string;
   chainHash?: string;
   handshake?: ServerHello;
+  decisionFailures?: Partial<Record<DecisionFailureClass, number>>;
   guarded: boolean;
   refuseActions: boolean;
+  /** Why mediated actions are refused for the rest of the session, when they are. */
+  refusalReason?: string;
 }
+
+export type DecisionFailureClass =
+  | "timeout" | "unreachable" | "malformed_response" | "guardian_error"
+  | "observed_agent_error" | "signature_invalid" | "handshake_failure" | "other";
 
 export type AcsFailureKind =
   | "configuration"
@@ -106,13 +121,26 @@ export type AcsFailureKind =
   | "unsupported_decision"
   | "invalid_modification";
 
+export interface AcsClientErrorDetail {
+  /** JSON-RPC error code when the Guardian answered with an error envelope. */
+  code?: number;
+  /** HTTP status when the transport answered without a usable JSON-RPC body. */
+  status?: number;
+}
+
 export class AcsClientError extends Error {
+  readonly code: number | undefined;
+  readonly status: number | undefined;
+
   constructor(
     public readonly kind: AcsFailureKind,
     message: string,
     public readonly causeValue?: unknown,
+    detail: AcsClientErrorDetail = {},
   ) {
     super(message);
     this.name = "AcsClientError";
+    this.code = detail.code;
+    this.status = detail.status;
   }
 }
